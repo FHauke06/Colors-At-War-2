@@ -1,0 +1,19 @@
+{
+  "name": "colors-at-war-2",
+  "version": "0.1.0",
+  "description": "Browserbasiertes Rundenstrategiespiel auf einer Europakarte",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "generate:map": "node scripts/generate-territories.mjs"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@turf/turf": "^7.4.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.0"
+  }
+}
