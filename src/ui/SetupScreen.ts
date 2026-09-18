@@ -1,5 +1,6 @@
 import type { GameState, LobbyState, Territory, TerritoryData } from '../engine/types';
 import { MIN_FACTIONS, MAX_FACTIONS } from '../engine/palette';
+import { canStart } from '../engine/session';
 import { MapRenderer } from '../render/MapRenderer';
 import type { GameClient } from '../net/GameClient';
 import { isHost } from '../net/GameClient';
@@ -18,13 +19,13 @@ export class SetupScreen {
   private readonly root: HTMLElement;
   private readonly territories: readonly Territory[];
   private readonly data: TerritoryData;
-  private readonly onComplete: (gameState: GameState) => void;
+  private readonly onComplete: (client: GameClient, gameState: GameState) => void;
 
   private client: GameClient | null = null;
   private map: MapRenderer | null = null;
   private unsubscribers: (() => void)[] = [];
 
-  constructor(container: HTMLElement, data: TerritoryData, onComplete: (gameState: GameState) => void) {
+  constructor(container: HTMLElement, data: TerritoryData, onComplete: (client: GameClient, gameState: GameState) => void) {
     this.data = data;
     this.territories = data.territories;
     this.onComplete = onComplete;
@@ -34,9 +35,15 @@ export class SetupScreen {
     this.renderModeSelect();
   }
 
-  private clear(): void {
+  /** Unsubscribes from the current client's events. Call when this screen is being torn down
+   *  (e.g. after the game starts) so it doesn't keep reacting to state changes in the background. */
+  destroy(): void {
     for (const unsub of this.unsubscribers) unsub();
     this.unsubscribers = [];
+  }
+
+  private clear(): void {
+    this.destroy();
     this.map = null;
     this.root.replaceChildren();
   }
@@ -77,6 +84,8 @@ export class SetupScreen {
     let factionCount = 4;
     const { card, nameInput } = this.renderPlayerAndCountForm(
       'Gegen den Computer spielen',
+      'Anzahl Fraktionen:',
+      MIN_FACTIONS,
       () => factionCount,
       (n) => { factionCount = n; },
     );
@@ -87,7 +96,7 @@ export class SetupScreen {
     startBtn.className = primaryBtnClass;
     startBtn.addEventListener('click', () => {
       const name = nameInput.value.trim() || 'Spieler 1';
-      this.client = new LocalGameClient(this.territories, factionCount, name);
+      this.client = new LocalGameClient(this.territories, name, factionCount - 1);
       this.enterLobby();
     });
 
@@ -128,12 +137,18 @@ export class SetupScreen {
   // --- step 3a: create an online session ---
   private renderOnlineHostConfig(): void {
     this.clear();
-    let factionCount = 4;
+    let maxHumans = 4;
     const { card, nameInput } = this.renderPlayerAndCountForm(
       'Session erstellen',
-      () => factionCount,
-      (n) => { factionCount = n; },
+      'Wie viele Spieler dürfen beitreten:',
+      1,
+      () => maxHumans,
+      (n) => { maxHumans = n; },
     );
+    const hint = document.createElement('p');
+    hint.className = 'text-sm text-slate-400';
+    hint.textContent = 'Computer-Gegner kannst du danach direkt in der Lobby hinzufügen.';
+    card.appendChild(hint);
 
     const createBtn = document.createElement('button');
     createBtn.type = 'button';
@@ -141,7 +156,7 @@ export class SetupScreen {
     createBtn.className = primaryBtnClass;
     createBtn.addEventListener('click', () => {
       const name = nameInput.value.trim() || 'Host';
-      this.client = new RemoteGameClient(resolveWsUrl(), { name, factionCount });
+      this.client = new RemoteGameClient(resolveWsUrl(), { name, maxHumans });
       this.enterLobby();
     });
 
@@ -190,9 +205,11 @@ export class SetupScreen {
     this.root.appendChild(card);
   }
 
-  // --- shared form for "name + faction count" (offline & online-host) ---
+  // --- shared form for "name + a bounded stepper" (offline faction count / online-host max humans) ---
   private renderPlayerAndCountForm(
     heading: string,
+    countLabelText: string,
+    minCount: number,
     getCount: () => number,
     setCount: (n: number) => void,
   ): { card: HTMLDivElement; nameInput: HTMLInputElement; countLabel: HTMLSpanElement; bumpCount: (d: number) => void } {
@@ -211,14 +228,14 @@ export class SetupScreen {
 
     const countRow = document.createElement('div');
     countRow.className = 'flex items-center gap-3';
-    const countLabelText = document.createElement('span');
-    countLabelText.textContent = 'Anzahl Fraktionen:';
-    countLabelText.className = 'text-sm text-slate-300';
+    const countLabelEl = document.createElement('span');
+    countLabelEl.textContent = countLabelText;
+    countLabelEl.className = 'text-sm text-slate-300';
     const countLabel = document.createElement('span');
     countLabel.className = 'w-8 text-center text-sm tabular-nums';
 
     const bumpCount = (delta: number): void => {
-      setCount(Math.min(MAX_FACTIONS, Math.max(MIN_FACTIONS, getCount() + delta)));
+      setCount(Math.min(MAX_FACTIONS, Math.max(minCount, getCount() + delta)));
       countLabel.textContent = String(getCount());
     };
     bumpCount(0);
@@ -235,7 +252,7 @@ export class SetupScreen {
     plusBtn.className = 'h-8 w-8 rounded-md border border-slate-600 bg-slate-800 text-lg leading-none hover:bg-slate-700';
     plusBtn.addEventListener('click', () => bumpCount(1));
 
-    countRow.append(countLabelText, minusBtn, countLabel, plusBtn);
+    countRow.append(countLabelEl, minusBtn, countLabel, plusBtn);
     card.append(title, nameInput, countRow);
     return { card, nameInput, countLabel, bumpCount };
   }
@@ -269,6 +286,12 @@ export class SetupScreen {
     const slotList = document.createElement('div');
     slotList.className = 'flex flex-wrap gap-2';
 
+    const addAiBtn = document.createElement('button');
+    addAiBtn.type = 'button';
+    addAiBtn.textContent = '+ KI hinzufügen';
+    addAiBtn.className = secondaryBtnClass;
+    addAiBtn.addEventListener('click', () => client.addAi());
+
     const hint = document.createElement('p');
     hint.className = 'text-sm text-slate-400';
     hint.textContent = 'Klicke auf der Karte ein Gebiet, um es als deine Hauptstadt festzulegen.';
@@ -286,7 +309,7 @@ export class SetupScreen {
     startBtn.addEventListener('click', () => client.start());
     actionRow.appendChild(startBtn);
 
-    wrap.append(status, errorBanner, slotList, hint, mapContainer, actionRow);
+    wrap.append(status, errorBanner, slotList, addAiBtn, hint, mapContainer, actionRow);
     this.root.appendChild(wrap);
 
     const showError = (message: string): void => {
@@ -295,10 +318,16 @@ export class SetupScreen {
     };
 
     const update = (lobby: LobbyState): void => {
-      const connecting = !lobby.code;
-      status.textContent = connecting
-        ? 'Verbinde...'
-        : `Session-Code: ${lobby.code} · ${lobby.slots.length}/${lobby.factionCount} Fraktionen vergeben`;
+      const host = isHost(client);
+      const connecting = client.isOnline && !lobby.code;
+
+      status.classList.toggle('hidden', !client.isOnline);
+      if (client.isOnline) {
+        status.textContent = connecting
+          ? 'Verbinde...'
+          : `Session-Code: ${lobby.code} · ${lobby.slots.length}/${lobby.maxHumans} Spieler beigetreten` +
+            (host ? '' : ' · Warte auf Host...');
+      }
 
       slotList.replaceChildren();
       for (const slot of lobby.slots) {
@@ -307,39 +336,53 @@ export class SetupScreen {
           slot.playerId === client.playerId ? 'Du' : null,
         ].filter((s): s is string => s !== null)));
       }
-      for (let i = lobby.slots.length; i < lobby.factionCount; i++) {
-        slotList.appendChild(this.renderSlotChip('#475569', `KI ${i + 1 - lobby.slots.length}`, 'wird beim Start vergeben', []));
+      for (const ai of lobby.aiSlots) {
+        const onRemove = client.isOnline && host ? () => client.removeAi(ai.id) : undefined;
+        slotList.appendChild(this.renderSlotChip(ai.color, ai.name, ai.capitalId, [], onRemove));
       }
+
+      const canAddMore = lobby.slots.length + lobby.aiSlots.length < MAX_FACTIONS;
+      addAiBtn.classList.toggle('hidden', !(client.isOnline && host));
+      addAiBtn.disabled = !canAddMore || connecting;
 
       this.map?.applyLobby(lobby);
 
-      const host = isHost(client);
       startBtn.classList.toggle('hidden', !host);
-      const ready = lobby.slots.every((s) => s.capitalId !== null) && lobby.slots.length > 0;
-      startBtn.disabled = !ready || connecting;
-      if (!host && !connecting) {
-        status.textContent += ' · Warte auf Host...';
-      }
+      startBtn.disabled = !canStart(lobby) || connecting;
     };
 
     this.unsubscribers.push(client.onLobby(update));
     this.unsubscribers.push(client.onError(showError));
-    this.unsubscribers.push(client.onGameStart((gameState) => this.onComplete(gameState)));
+    this.unsubscribers.push(client.onGameStart((gameState) => this.onComplete(client, gameState)));
 
     update(client.getLobby());
   }
 
-  private renderSlotChip(color: string, name: string, capitalLabel: string | null, tags: readonly string[]): HTMLDivElement {
+  private renderSlotChip(
+    color: string,
+    name: string,
+    capitalId: string | null,
+    tags: readonly string[],
+    onRemove?: () => void,
+  ): HTMLDivElement {
     const chip = document.createElement('div');
     chip.className = 'flex items-center gap-2 rounded-md border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm text-slate-100';
     const swatch = document.createElement('span');
     swatch.className = 'h-3 w-3 shrink-0 rounded-full';
     swatch.style.background = color;
     const text = document.createElement('span');
-    const capital = capitalLabel ? this.territories.find((t) => t.id === capitalLabel)?.name ?? capitalLabel : 'wählt noch...';
+    const capital = capitalId ? this.territories.find((t) => t.id === capitalId)?.name ?? capitalId : 'wählt noch...';
     const tagText = tags.length ? ` (${tags.join(', ')})` : '';
     text.textContent = `${name}${tagText} — ${capital}`;
     chip.append(swatch, text);
+    if (onRemove) {
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.textContent = '✕';
+      removeBtn.className = 'text-slate-400 hover:text-red-400';
+      removeBtn.addEventListener('click', onRemove);
+      chip.appendChild(removeBtn);
+    }
     return chip;
   }
 }

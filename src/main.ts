@@ -1,6 +1,7 @@
 import './style.css';
 import territoryData from './data/territories.json';
 import type { GameState, TerritoryData } from './engine/types';
+import type { GameClient } from './net/GameClient';
 import { SetupScreen } from './ui/SetupScreen';
 import { GameScreen } from './ui/GameScreen';
 
@@ -18,9 +19,10 @@ app.appendChild(header);
 const screenContainer = document.createElement('div');
 app.appendChild(screenContainer);
 
-function showGame(gameState: GameState): void {
+function showGame(client: GameClient, gameState: GameState): void {
+  setup.destroy();
   screenContainer.replaceChildren();
-  new GameScreen(screenContainer, data, gameState);
+  new GameScreen(screenContainer, data, client, gameState);
 }
 
-new SetupScreen(screenContainer, data, showGame);
+const setup = new SetupScreen(screenContainer, data, showGame);

@@ -1,4 +1,4 @@
-import type { GameState, LobbyState } from '../engine/types';
+import type { GameState, LobbyState, UnitComposition } from '../engine/types';
 import { deserializeGameState } from '../engine/session';
 import type { ClientMessage, ServerMessage } from './protocol';
 import type { GameClient } from './GameClient';
@@ -13,22 +13,25 @@ export interface RemoteSessionOptions {
   /** Omit to create a new session (host); provide to join an existing one. */
   readonly code?: string;
   readonly name: string;
-  /** Only used (and required) when creating a new session. */
-  readonly factionCount?: number;
+  /** How many human slots the lobby accepts; only used (and required) when creating. */
+  readonly maxHumans?: number;
 }
 
 /** Online mode: proxies the same GameClient interface over a WebSocket to the session server. */
 export class RemoteGameClient implements GameClient {
   readonly playerId = generateId();
+  readonly isOnline = true;
 
   private readonly ws: WebSocket;
   private lobby: LobbyState;
+  private hasStarted = false;
   private readonly lobbyListeners = new Set<(lobby: LobbyState) => void>();
   private readonly startListeners = new Set<(gameState: GameState) => void>();
+  private readonly stateListeners = new Set<(gameState: GameState) => void>();
   private readonly errorListeners = new Set<(message: string) => void>();
 
   constructor(wsUrl: string, options: RemoteSessionOptions) {
-    this.lobby = { code: '', factionCount: options.factionCount ?? 0, slots: [], status: 'lobby' };
+    this.lobby = { code: '', maxHumans: options.maxHumans ?? 0, slots: [], aiSlots: [], status: 'lobby' };
 
     this.ws = new WebSocket(wsUrl);
     this.ws.addEventListener('open', () => {
@@ -37,7 +40,7 @@ export class RemoteGameClient implements GameClient {
         playerId: this.playerId,
         code: options.code,
         name: options.name,
-        factionCount: options.factionCount,
+        maxHumans: options.maxHumans,
       });
     });
     this.ws.addEventListener('message', (event) => {
@@ -47,9 +50,15 @@ export class RemoteGameClient implements GameClient {
           this.lobby = msg.lobby;
           this.lobbyListeners.forEach((cb) => cb(this.lobby));
           break;
-        case 'game_started':
-          this.startListeners.forEach((cb) => cb(deserializeGameState(msg.gameState)));
+        case 'game_state': {
+          const gameState = deserializeGameState(msg.gameState);
+          if (!this.hasStarted) {
+            this.hasStarted = true;
+            this.startListeners.forEach((cb) => cb(gameState));
+          }
+          this.stateListeners.forEach((cb) => cb(gameState));
           break;
+        }
         case 'error':
           this.errorListeners.forEach((cb) => cb(msg.message));
           break;
@@ -81,6 +90,11 @@ export class RemoteGameClient implements GameClient {
     return () => this.startListeners.delete(cb);
   }
 
+  onGameState(cb: (gameState: GameState) => void): () => void {
+    this.stateListeners.add(cb);
+    return () => this.stateListeners.delete(cb);
+  }
+
   onError(cb: (message: string) => void): () => void {
     this.errorListeners.add(cb);
     return () => this.errorListeners.delete(cb);
@@ -90,14 +104,35 @@ export class RemoteGameClient implements GameClient {
     this.send({ type: 'claim_capital', territoryId });
   }
 
+  addAi(): void {
+    this.send({ type: 'add_ai' });
+  }
+
+  removeAi(aiId: string): void {
+    this.send({ type: 'remove_ai', aiId });
+  }
+
   start(): void {
     this.send({ type: 'start' });
+  }
+
+  moveUnits(fromId: string, toId: string, amount: UnitComposition): void {
+    this.send({ type: 'move_units', fromId, toId, amount });
+  }
+
+  endTurn(): void {
+    this.send({ type: 'end_turn' });
+  }
+
+  recruit(territoryId: string, amount: UnitComposition): void {
+    this.send({ type: 'recruit', territoryId, amount });
   }
 
   close(): void {
     this.ws.close();
     this.lobbyListeners.clear();
     this.startListeners.clear();
+    this.stateListeners.clear();
     this.errorListeners.clear();
   }
 }

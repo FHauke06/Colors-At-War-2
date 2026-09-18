@@ -13,5 +13,5 @@
     "types": ["node"],
     "noEmit": true
   },
-  "include": ["**/*.ts", "../src/engine/**/*.ts", "../src/net/protocol.ts"]
+  "include": ["**/*.ts", "../src/engine/**/*.ts", "../src/net/protocol.ts", "../src/data/*.ts"]
 }

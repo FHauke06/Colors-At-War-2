@@ -36,15 +36,23 @@ export interface Player {
 export interface TerritoryState {
   readonly ownerId: string | null;
   readonly garrison: UnitComposition;
+  /** Of `garrison`, how many arrived (by moving or capturing) this round - a unit may only
+   *  move once per round, so these can't be sent onward again until the round resets. */
+  readonly movedIn: UnitComposition;
 }
 
 export interface GameState {
+  /** Round number - increments each time the active player wraps back to the first player. */
   readonly turn: number;
+  /** Whose turn it currently is; only this player may move units or end the turn. */
+  readonly activePlayerId: string;
   readonly players: readonly Player[];
   readonly territoryState: ReadonlyMap<string, TerritoryState>;
+  /** Rüstungspunkte per player, spent on recruiting new units. */
+  readonly resources: ReadonlyMap<string, number>;
 }
 
-/** A human seat in the pre-game lobby. AI seats aren't slots - they're filled in at start. */
+/** A human seat in the pre-game lobby. */
 export interface LobbySlot {
   readonly playerId: string;
   readonly name: string;
@@ -53,16 +61,28 @@ export interface LobbySlot {
   readonly isHost: boolean;
 }
 
+/** An AI seat, added interactively in the lobby - it gets a capital immediately, not at start. */
+export interface AiSlot {
+  readonly id: string;
+  readonly name: string;
+  readonly color: string;
+  readonly capitalId: string;
+}
+
 export interface LobbyState {
   readonly code: string;
-  readonly factionCount: number;
+  /** Caps how many human slots may join; unrelated to how many AI get added. */
+  readonly maxHumans: number;
   readonly slots: readonly LobbySlot[];
+  readonly aiSlots: readonly AiSlot[];
   readonly status: 'lobby' | 'started';
 }
 
 /** JSON-safe wire form of GameState (Map -> entry array). */
 export interface GameStateWire {
   readonly turn: number;
+  readonly activePlayerId: string;
   readonly players: readonly Player[];
   readonly territoryState: readonly (readonly [string, TerritoryState])[];
+  readonly resources: readonly (readonly [string, number])[];
 }
