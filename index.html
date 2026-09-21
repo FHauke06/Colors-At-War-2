@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Colors at War</title>
+    <script>
+      // Applied synchronously, before first paint, so a saved dark-mode preference never flashes
+      // the default light theme first.
+      if (localStorage.getItem('colors-at-war-theme') === 'dark') {
+        document.documentElement.classList.add('dark');
+      }
+    </script>
   </head>
   <body class="bg-slate-900 text-slate-100">
     <div id="app"></div>

@@ -1,9 +1,11 @@
 import type { GameState, Territory, TerritoryState, UnitComposition } from './types';
+import { areAtWar } from './diplomacy';
+import { addToPlayerStats } from './stats';
 
-const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0 };
+const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0 };
 
 export function totalUnits(garrison: UnitComposition): number {
-  return garrison.infantry + garrison.lightTank + garrison.heavyTank;
+  return garrison.infantry + garrison.lightTank + garrison.heavyTank + garrison.artillery;
 }
 
 export function addGarrisons(a: UnitComposition, b: UnitComposition): UnitComposition {
@@ -11,6 +13,7 @@ export function addGarrisons(a: UnitComposition, b: UnitComposition): UnitCompos
     infantry: a.infantry + b.infantry,
     lightTank: a.lightTank + b.lightTank,
     heavyTank: a.heavyTank + b.heavyTank,
+    artillery: a.artillery + b.artillery,
   };
 }
 
@@ -19,6 +22,7 @@ export function subtractGarrisons(a: UnitComposition, b: UnitComposition): UnitC
     infantry: a.infantry - b.infantry,
     lightTank: a.lightTank - b.lightTank,
     heavyTank: a.heavyTank - b.heavyTank,
+    artillery: a.artillery - b.artillery,
   };
 }
 
@@ -27,9 +31,11 @@ function fitsWithin(amount: UnitComposition, available: UnitComposition): boolea
     amount.infantry >= 0 &&
     amount.lightTank >= 0 &&
     amount.heavyTank >= 0 &&
+    amount.artillery >= 0 &&
     amount.infantry <= available.infantry &&
     amount.lightTank <= available.lightTank &&
-    amount.heavyTank <= available.heavyTank
+    amount.heavyTank <= available.heavyTank &&
+    amount.artillery <= available.artillery
   );
 }
 
@@ -47,12 +53,12 @@ export type MoveOutcome =
  * Moves `amount` units from a territory onto an adjacent one - at most what's currently
  * available there (garrison minus whatever already moved this round). Anything left behind
  * stays put, still owned by the mover, free to move again once the round resets. Only the
- * active player may move.
+ * active player may move, and never while a battle is pending (see engine/combat.ts).
  *
  * - Neutral or own destination: relocates/reinforces, no resistance.
  * - Enemy destination with an empty garrison: uncontested capture.
- * - Enemy destination with a defended garrison: rejected - tactical combat isn't implemented
- *   yet (a later roadmap step), so this is surfaced as a blocked move rather than guessed at.
+ * - Enemy destination with a defended garrison: rejected - attacking a defended territory goes
+ *   through engine/combat.ts's startBattle/deployment flow instead, not a plain move.
  */
 export function moveUnits(
   gameState: GameState,
@@ -62,6 +68,7 @@ export function moveUnits(
   territories: readonly Territory[],
   amount: UnitComposition,
 ): MoveOutcome {
+  if (gameState.pendingBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
 
   const fromTerritory = territories.find((t) => t.id === fromId);
@@ -93,9 +100,17 @@ export function moveUnits(
   }
 
   if (totalUnits(toState.garrison) === 0) {
+    if (!areAtWar(gameState, playerId, toState.ownerId)) {
+      return { ok: false, reason: 'Kein Kriegszustand - erst den Krieg erklären, bevor Gebiete erobert werden können.' };
+    }
     nextTerritoryState.set(toId, { ownerId: playerId, garrison: amount, movedIn: amount });
-    return { ok: true, gameState: { ...gameState, territoryState: nextTerritoryState } };
+    const conqueredState = addToPlayerStats(
+      { ...gameState, territoryState: nextTerritoryState },
+      playerId,
+      { territoriesConquered: 1 },
+    );
+    return { ok: true, gameState: conqueredState };
   }
 
-  return { ok: false, reason: 'Das Gebiet ist verteidigt - das Kampfsystem folgt in einem späteren Schritt.' };
+  return { ok: false, reason: 'Das Gebiet ist verteidigt - greife an, statt zu verschieben.' };
 }

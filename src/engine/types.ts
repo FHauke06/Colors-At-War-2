@@ -16,12 +16,35 @@ export interface TerritoryData {
 /**
  * A garrison is a headcount per unit type, not individual units - there is no per-unit HP.
  * Combat strength is compared via a common denominator: 5 Infanterie = 2 leichte Panzer =
- * 1 schwerer Panzer, i.e. infantry=1, lightTank=2.5, heavyTank=5 strength points each.
+ * 1 schwerer Panzer, i.e. infantry=1, lightTank=2.5, heavyTank=5 strength points each. Artillery
+ * carries no ordinary battle strength at all (offense or defense) - see engine/combat.ts's
+ * STRENGTH/reduceByStrength - its entire combat role is the ranged bombardBattleCell action.
  */
 export interface UnitComposition {
   readonly infantry: number;
   readonly lightTank: number;
   readonly heavyTank: number;
+  readonly artillery: number;
+}
+
+export type GroundTech = 'lightTank' | 'heavyTank' | 'artillery';
+export type AirTech = 'fighters' | 'cas' | 'bombers';
+
+/** How aggressively and effectively every AI seat in a game plays - chosen once, for the whole
+ *  lobby, before the game starts (see LobbyState.aiDifficulty/engine/session.ts's createLobby) and
+ *  applied to every AI added to it. Distinct from Player.aiTechAffinity (each AI's own random
+ *  personality roll for HOW it diversifies) - this instead scales HOW WELL it plays: see
+ *  engine/ai.ts's DIFFICULTY_PROFILES for exactly which thresholds move. */
+export type AiDifficulty = 'easy' | 'medium' | 'hard';
+
+/** Which non-Infanterie unit/aircraft types a player has unlocked via the Research tab - see
+ *  engine/research.ts. Infanterie needs no unlock, always available. Sparse in GameState.research:
+ *  a player with no entry has unlocked nothing (the human default at game start) - AI seats get
+ *  every tech unlocked immediately instead (see engine/setup.ts's buildGameStateFromLobby), so
+ *  they're never gated by a system they don't spend points playing. */
+export interface ResearchState {
+  readonly unlockedGround: readonly GroundTech[];
+  readonly unlockedAir: readonly AirTech[];
 }
 
 export interface Player {
@@ -31,6 +54,39 @@ export interface Player {
   readonly color: string;
   readonly capitalId: string;
   readonly isAI: boolean;
+  /** AI seats only (undefined for humans) - how strongly this particular AI leans into anything
+   *  beyond plain Infanterie: Leichte/Schwere Panzer, Artillerie, and the Airforce. Rolled once,
+   *  randomly, per AI at game start (see engine/setup.ts's buildGameStateFromLobby) and never
+   *  changes after, so each AI seat keeps a consistent "personality" for the rest of the game
+   *  instead of re-rolling the question every turn - see engine/ai.ts's techAffinityOf for how
+   *  it's used. Range [0, 1]: 0 behaves exactly like a diversification-free, Infanterie-only AI;
+   *  1 commits the most any AI ever will. */
+  readonly aiTechAffinity?: number;
+  /** AI seats only (undefined for humans) - the lobby-wide difficulty in effect when this AI was
+   *  added (see LobbyState.aiDifficulty). Copied onto the Player at game start so engine/ai.ts can
+   *  read it without needing the lobby around any more. */
+  readonly aiDifficulty?: AiDifficulty;
+}
+
+/** A headcount per aircraft type stationed somewhere - see engine/airforce.ts. Unlike
+ *  UnitComposition, there's no per-unit HP or STRENGTH conversion here; each type's combat effect
+ *  (Jäger attrition, Bomber damage, CAS strikes) is its own formula, documented in airforce.ts. */
+export interface AirComposition {
+  readonly fighters: number;
+  readonly cas: number;
+  readonly bombers: number;
+}
+
+/** A territory's Flugplatz (airfield): `level` 0 means none built yet (capacity 0, nothing can be
+ *  stationed there - see engine/airforce.ts's airfieldCapacity). `aircraft` is what's currently
+ *  stationed there, available for recruiting into, launching a Bomber raid from, or calling into a
+ *  nearby tactical battle - excluding anything currently away on a raid or called into a battle
+ *  (see PendingBattle's calledAircraft, and launchBomberRaid, which resolves instantly and never
+ *  leaves a lingering "in transit" state on the main map). Sparse in GameState.airfields: a
+ *  territory with no entry has no airfield at all (equivalent to level 0, empty aircraft). */
+export interface AirfieldState {
+  readonly level: number;
+  readonly aircraft: AirComposition;
 }
 
 export interface TerritoryState {
@@ -41,6 +97,179 @@ export interface TerritoryState {
   readonly movedIn: UnitComposition;
 }
 
+/** 'river' and 'mountain' are impassable - see engine/battleMaps.ts. */
+export type BattleTerrain = 'normal' | 'river' | 'mountain';
+
+/** A "kleines Gebiet" (one grid cell) on the tactical battle map. Static structure (where it
+ *  sits, which starting side it belongs to, what it touches); never reveals troop counts by
+ *  itself. `side` only marks the initial deployment zone - ownership of the cell itself can
+ *  change mid-battle (see BattleSubState). `isEscape` marks the single row beyond the defender's
+ *  back line: nobody may deploy there, and units that move onto it break through onto the main
+ *  map instead of occupying it (see engine/combat.ts's escapeBattle). A non-'normal' `terrain`
+ *  cell is excluded from `neighbors` on every side - nothing can ever stand on it or pass
+ *  through it. `isCity` marks one of 3 objective cells per side (deployable and ownable like any
+ *  normal cell) - capturing all 3 of the opponent's ends the battle immediately, win condition on
+ *  top of (not instead of) wiping out their whole force - see engine/combat.ts's checkConclusion. */
+export interface BattleSubTerritory {
+  readonly id: string;
+  readonly row: number;
+  readonly col: number;
+  readonly side: 'attacker' | 'defender';
+  readonly isEscape: boolean;
+  readonly terrain: BattleTerrain;
+  readonly isCity: boolean;
+  readonly neighbors: readonly string[];
+}
+
+/** Garrison sitting on one BattleSubTerritory - ownership can change mid-battle (a cell captured
+ *  across the frontier belongs to whoever took it, not fixed to its original side). */
+export interface BattleSubState {
+  readonly ownerId: string;
+  readonly garrison: UnitComposition;
+  readonly movedIn: UnitComposition;
+}
+
+/** One deployment placement: `amount` units placed on a single "kleines Gebiet". Deployment as a
+ *  whole is a sparse list of these (most cells on a 16x16 battlefield stay empty), built up by
+ *  clicking directly on the grid rather than a quantity menu. */
+export interface BattlePlacement {
+  readonly subId: string;
+  readonly amount: UnitComposition;
+}
+
+/**
+ * One call-in of Jäger or CAS support into a tactical battle - see engine/combat.ts's
+ * callAirSupport/processAirSupportArrivals/casStrike. `fromTerritoryId` is the home airfield it
+ * came from (and returns to) - kept on every entry, including once active, specifically so a
+ * battle's end can return surviving Jäger to the airfield they actually launched from rather than
+ * some aggregate pool with no memory of that. Lifecycle by type:
+ * - Jäger: 'incoming' (roundsRemaining counts down from 1) -> 'active' (joins the battle's shared
+ *   Luftüberlegenheit contest - see engine/combat.ts's battleAirSuperiority/
+ *   resolveInBattleAirCombat - and is subject to attrition each full round; `count` shrinks in
+ *   place as losses are taken, entry removed once it hits 0). Survivors return to fromTerritoryId
+ *   the moment the battle concludes.
+ * - CAS: 'incoming' (roundsRemaining counts down from 3) -> 'ready' (available for one casStrike,
+ *   no time limit to use it) -> 'returning' (roundsRemaining counts down from 3 after striking) ->
+ *   removed, `count` added back to fromTerritoryId's airfield. If the battle concludes at any
+ *   point before that, the CAS returns to fromTerritoryId immediately instead of waiting out the
+ *   remaining transit time.
+ */
+export interface CalledAircraft {
+  readonly id: string;
+  readonly side: 'attacker' | 'defender';
+  readonly type: 'fighter' | 'cas';
+  readonly count: number;
+  readonly fromTerritoryId: string;
+  readonly status: 'incoming' | 'active' | 'ready' | 'returning';
+  readonly roundsRemaining: number;
+}
+
+/**
+ * A battle in progress - see engine/combat.ts. Two phases:
+ * - Deployment: attackerDeployed/defenderDeployed track progress only (booleans, not the actual
+ *   placement) so neither side can see the other's tactical choice before committing their own;
+ *   subState is null until both are in.
+ * - Battle: subState holds the live (fully visible to both, and to anyone else watching) tactical
+ *   map. activeSide alternates between the two combatants - a turn cycle of its own, independent
+ *   of the main game's turn order - until one side has zero units left anywhere on the map.
+ * Blocks every other action (see engine/movement.ts, economy.ts, turns.ts) until it concludes.
+ */
+export interface PendingBattle {
+  readonly territoryId: string;
+  readonly fromId: string;
+  readonly attackerId: string;
+  readonly defenderId: string;
+  readonly attackerMax: UnitComposition;
+  readonly defenderMax: UnitComposition;
+  readonly attackerDeployed: boolean;
+  readonly defenderDeployed: boolean;
+  /** Which of engine/battleMaps.ts's BATTLE_MAPS was rolled for this fight - purely informational
+   *  (the terrain itself already lives on each subTerritory), shown in the tactical view header. */
+  readonly battleMapName: string;
+  readonly subTerritories: readonly BattleSubTerritory[];
+  readonly subState: ReadonlyMap<string, BattleSubState> | null;
+  readonly activeSide: 'attacker' | 'defender' | null;
+  /** 0 during deployment; 1 once the fighting starts, incrementing every time it wraps back to
+   *  the attacker (a full round). Both sides know the round limit (see engine/combat.ts's
+   *  MAX_BATTLE_ROUNDS) - past it, the defender wins outright, having simply outlasted the clock. */
+  readonly battleRound: number;
+  /** Jäger and CAS called into this specific battle, at every stage of their round trip - see
+   *  CalledAircraft. A side's current Luftüberlegenheit (the bar next to the tactical grid, and the
+   *  >50% gate on calling CAS) is always derived from this list's 'active' Jäger entries - see
+   *  engine/combat.ts's battleAirSuperiority - rather than cached separately. */
+  readonly calledAircraft: readonly CalledAircraft[];
+}
+
+/** JSON-safe wire form of PendingBattle (subState Map -> entry array). */
+export interface PendingBattleWire {
+  readonly territoryId: string;
+  readonly fromId: string;
+  readonly attackerId: string;
+  readonly defenderId: string;
+  readonly attackerMax: UnitComposition;
+  readonly defenderMax: UnitComposition;
+  readonly attackerDeployed: boolean;
+  readonly defenderDeployed: boolean;
+  readonly battleMapName: string;
+  readonly subTerritories: readonly BattleSubTerritory[];
+  readonly subState: readonly (readonly [string, BattleSubState])[] | null;
+  readonly activeSide: 'attacker' | 'defender' | null;
+  readonly battleRound: number;
+  readonly calledAircraft: readonly CalledAircraft[];
+}
+
+/** Factories and infrastructure built at a territory - see engine/economy.ts. Sparse: a
+ *  territory with nothing built has no entry (treat a missing entry as {factories: 0,
+ *  infrastructureLevel: 0}). Tracked per territory id, not per owner - conquering a developed
+ *  territory keeps whatever was built there. */
+export interface TerritoryDevelopment {
+  readonly factories: number;
+  readonly infrastructureLevel: number;
+}
+
+/** A non-aggression pact between two players - see engine/diplomacy.ts. `active` pacts block a
+ *  war declaration outright; a cancelled one still blocks it until `blocksWarUntilRound` has
+ *  passed (a 3-round cooldown), after which the relation reverts to plain peace. */
+export type PactState =
+  | { readonly active: true }
+  | { readonly active: false; readonly blocksWarUntilRound: number };
+
+/** Relation between one specific pair of players. Missing from `relations` means the default:
+ *  at peace, no pact - which already forbids attacking (see engine/diplomacy.ts's areAtWar). */
+export interface DiplomaticRelation {
+  readonly atWar: boolean;
+  readonly pact: PactState | null;
+}
+
+/** All diplomacy between every pair of players. `relations` is keyed by engine/diplomacy.ts's
+ *  `pairKey(a, b)` (order-independent). `pactProposals` holds one-sided, not-yet-mutual pact
+ *  offers, keyed by `"<fromId>->" + toId` - once both sides have proposed to each other the pact
+ *  activates immediately and both entries are cleared. */
+export interface DiplomacyState {
+  readonly relations: ReadonlyMap<string, DiplomaticRelation>;
+  readonly pactProposals: ReadonlySet<string>;
+}
+
+/** JSON-safe wire form of DiplomacyState (Map/Set -> arrays). */
+export interface DiplomacyStateWire {
+  readonly relations: readonly (readonly [string, DiplomaticRelation])[];
+  readonly pactProposals: readonly string[];
+}
+
+/** A player's running totals across the whole game so far - unlike territoryState/development
+ *  (current snapshots), these only ever accumulate, tracked for the end-of-game stats screen (see
+ *  engine/stats.ts and ui/GameScreen.ts's renderStatsView). territoriesConquered only counts
+ *  ground taken from an enemy (a peaceful claim onto unowned territory isn't "conquering" it), and
+ *  battlesWon only counts a whole engagement's outcome (see engine/stats.ts) - not each individual
+ *  tactical sub-map cell exchange along the way. unitsDefeated/unitsLost count raw unit counts
+ *  (infantry+lightTank+heavyTank as 1 each), not strength points. */
+export interface PlayerStats {
+  readonly battlesWon: number;
+  readonly territoriesConquered: number;
+  readonly unitsDefeated: number;
+  readonly unitsLost: number;
+}
+
 export interface GameState {
   /** Round number - increments each time the active player wraps back to the first player. */
   readonly turn: number;
@@ -48,8 +277,21 @@ export interface GameState {
   readonly activePlayerId: string;
   readonly players: readonly Player[];
   readonly territoryState: ReadonlyMap<string, TerritoryState>;
-  /** Rüstungspunkte per player, spent on recruiting new units. */
+  /** Rüstungspunkte per player, spent on recruiting new units, factories and infrastructure. */
   readonly resources: ReadonlyMap<string, number>;
+  readonly development: ReadonlyMap<string, TerritoryDevelopment>;
+  readonly diplomacy: DiplomacyState;
+  /** Cumulative per-player stats for the end-of-game stats screen - see PlayerStats. */
+  readonly stats: ReadonlyMap<string, PlayerStats>;
+  /** Flugplätze and the aircraft stationed at them - see engine/airforce.ts. Sparse, same
+   *  convention as `development`: a territory with no entry has no airfield. */
+  readonly airfields: ReadonlyMap<string, AirfieldState>;
+  /** Which unit/aircraft types each player has unlocked via the Research tab - see
+   *  engine/research.ts. Sparse: a player with no entry has unlocked nothing but Infanterie. */
+  readonly research: ReadonlyMap<string, ResearchState>;
+  /** Set while a battle (deployment or the tactical fight itself) is in progress; blocks all
+   *  other actions (see engine/combat.ts) until it concludes. */
+  readonly pendingBattle: PendingBattle | null;
 }
 
 /** A human seat in the pre-game lobby. */
@@ -76,6 +318,11 @@ export interface LobbyState {
   readonly slots: readonly LobbySlot[];
   readonly aiSlots: readonly AiSlot[];
   readonly status: 'lobby' | 'started';
+  /** Set once, by whoever creates the lobby (see engine/session.ts's createLobby) - applies to
+   *  every AI seat added to this lobby, "am Spielbeginn einstellen, wie gut die KI ist" rather
+   *  than a per-seat choice. Copied onto each AI's Player at game start (see
+   *  Player.aiDifficulty/engine/setup.ts's buildGameStateFromLobby). */
+  readonly aiDifficulty: AiDifficulty;
 }
 
 /** JSON-safe wire form of GameState (Map -> entry array). */
@@ -85,4 +332,10 @@ export interface GameStateWire {
   readonly players: readonly Player[];
   readonly territoryState: readonly (readonly [string, TerritoryState])[];
   readonly resources: readonly (readonly [string, number])[];
+  readonly development: readonly (readonly [string, TerritoryDevelopment])[];
+  readonly diplomacy: DiplomacyStateWire;
+  readonly stats: readonly (readonly [string, PlayerStats])[];
+  readonly airfields: readonly (readonly [string, AirfieldState])[];
+  readonly research: readonly (readonly [string, ResearchState])[];
+  readonly pendingBattle: PendingBattleWire | null;
 }

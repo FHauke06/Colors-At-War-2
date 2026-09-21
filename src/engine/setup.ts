@@ -1,8 +1,10 @@
-import type { GameState, LobbyState, Player, Territory, TerritoryState, UnitComposition } from './types';
+import type { GameState, LobbyState, Player, ResearchState, Territory, TerritoryState, UnitComposition } from './types';
 import { MIN_FACTIONS } from './palette';
+import { emptyDiplomacyState } from './diplomacy';
+import { fullResearchState } from './research';
 
-const STARTING_GARRISON: UnitComposition = { infantry: 10, lightTank: 0, heavyTank: 0 };
-const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0 };
+const STARTING_GARRISON: UnitComposition = { infantry: 10, lightTank: 0, heavyTank: 0, artillery: 0 };
+const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0 };
 
 /** Picks `count` random territories (excluding any in `alreadyPicked`) - used to give AI seats
  *  a capital. Each call reshuffles, so repeated single picks (as `addAi` does) are independent. */
@@ -48,6 +50,10 @@ export function buildGameStateFromLobby(lobby: LobbyState, territories: readonly
       color: ai.color,
       capitalId: ai.capitalId,
       isAI: true,
+      // Each AI seat's one-time personality roll - see Player.aiTechAffinity.
+      aiTechAffinity: Math.random(),
+      // The lobby-wide difficulty chosen when this lobby was created - see Player.aiDifficulty.
+      aiDifficulty: lobby.aiDifficulty,
     })),
   ];
 
@@ -63,6 +69,25 @@ export function buildGameStateFromLobby(lobby: LobbyState, territories: readonly
 
   const resources = new Map(players.map((p): [string, number] => [p.id, 0]));
 
+  // Human seats start with only Infanterie unlocked (see engine/research.ts's Research tab) - AI
+  // seats get every tech unlocked immediately instead, so they keep their full existing tactical
+  // repertoire without ever having to spend points researching it themselves.
+  const research = new Map<string, ResearchState>(
+    players.filter((p) => p.isAI).map((p): [string, ResearchState] => [p.id, fullResearchState()]),
+  );
+
   // The host (always the first slot, always human) goes first.
-  return { turn: 1, activePlayerId: players[0]!.id, players, territoryState, resources };
+  return {
+    turn: 1,
+    activePlayerId: players[0]!.id,
+    players,
+    territoryState,
+    resources,
+    development: new Map(),
+    diplomacy: emptyDiplomacyState(),
+    stats: new Map(),
+    airfields: new Map(),
+    research,
+    pendingBattle: null,
+  };
 }

@@ -1,7 +1,11 @@
-import type { GameState, LobbyState, Territory, TerritoryData } from '../engine/types';
+import type { AirfieldState, GameState, LobbyState, Territory, TerritoryData, UnitComposition } from '../engine/types';
 import { NEUTRAL_COLOR } from '../engine/palette';
-import { totalUnits } from '../engine/movement';
+import { totalUnits, subtractGarrisons } from '../engine/movement';
 import { resourceValue } from '../engine/economy';
+import { getRelation } from '../engine/diplomacy';
+import { projectableFightersAt } from '../engine/airforce';
+import { UNIT_ICON_PATHS, UNIT_TYPES } from './unitIcons';
+import { AIRCRAFT_ICON_PATHS, AIRCRAFT_TYPES } from './aircraftIcons';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -10,6 +14,17 @@ function resourceHeatColor(value: number, min: number, max: number): string {
   const t = max > min ? (value - min) / (max - min) : 0.5;
   const hue = 215 - t * 205;
   return `hsl(${hue}, 55%, 32%)`;
+}
+
+/** Green (100% own Jäger presence) -> red (100% enemy), by the same fraction as
+ *  engine/airforce.ts's airSuperiorityFraction - undefined (falls through to NEUTRAL_COLOR grey in
+ *  `paint`) when neither side has any Jäger projectable there at all, distinct from a genuinely
+ *  50/50 contested spot (which lands mid-gradient, not grey). */
+function airSuperiorityColor(myFighters: number, enemyFighters: number): string | undefined {
+  if (myFighters + enemyFighters === 0) return undefined;
+  const fraction = myFighters / (myFighters + enemyFighters);
+  const hue = fraction * 120; // 0 = red, 120 = green
+  return `hsl(${hue}, 65%, 38%)`;
 }
 
 // Hover/drag/drop-target cues are drawn as a stroke, never a fill: fill carries real information
@@ -22,6 +37,22 @@ function resourceHeatColor(value: number, min: number, max: number): string {
 const RELATED_STROKE = '#fbbf24'; // amber-400
 const RELATED_STROKE_WIDTH = '0.15';
 const HOVERED_STROKE_WIDTH = '0.22';
+
+// The "currently selected" outline is a separate overlay path (same `d` as the territory, drawn
+// on top) rather than styling the territory's own stroke like hover/drag do - that would conflict
+// the moment the pointer also hovers or drags across the same shape, since onEnter/onLeave own
+// that property too and would clobber a persistent selection the instant the pointer left.
+const SELECTED_STROKE = '#fbbf24'; // amber-400
+const SELECTED_STROKE_WIDTH = '0.3';
+
+// Diplomacy tab colors (see applyDiplomacyView) - unoccupied territories fall through to
+// NEUTRAL_COLOR the same as every other view, so there's no separate constant for that case.
+const DIPLOMACY_OWN_COLOR = '#16a34a'; // green-600
+const DIPLOMACY_ALLY_COLOR = '#2563eb'; // blue-600
+const DIPLOMACY_WAR_COLOR = '#dc2626'; // red-600
+// A rival at plain peace (no pact, no war) isn't any of the 4 requested states - kept one shade
+// lighter than NEUTRAL_COLOR so it doesn't read as unowned, without introducing a 5th loud color.
+const DIPLOMACY_PEACE_COLOR = '#64748b'; // slate-500
 
 interface CapitalMarker {
   readonly capitalId: string;
@@ -36,6 +67,7 @@ export interface DragHandler {
 
 export class MapRenderer {
   private readonly svg: SVGSVGElement;
+  private readonly selectionLayer: SVGGElement;
   private readonly markerLayer: SVGGElement;
   private readonly tooltip: HTMLDivElement;
   private readonly pathsById = new Map<string, SVGPathElement>();
@@ -66,7 +98,10 @@ export class MapRenderer {
       el.style.fill = NEUTRAL_COLOR;
       el.classList.add(
         'cursor-pointer',
-        'stroke-slate-900',
+        // Fixed (not theme-reactive) so borders stay dark and readable against both the light
+        // theme's near-white sea and the dark theme's navy one - gray, not slate, so it isn't
+        // caught up in style.css's slate-scale remap between the two themes.
+        'stroke-gray-900',
         '[stroke-width:0.07]',
         '[vector-effect:non-scaling-stroke]',
         'transition-colors',
@@ -82,12 +117,16 @@ export class MapRenderer {
       this.pathsById.set(territory.id, el);
     }
 
+    this.selectionLayer = document.createElementNS(SVG_NS, 'g');
+    this.selectionLayer.classList.add('pointer-events-none');
+    this.svg.appendChild(this.selectionLayer);
+
     this.markerLayer = document.createElementNS(SVG_NS, 'g');
     this.markerLayer.classList.add('pointer-events-none');
     this.svg.appendChild(this.markerLayer);
 
     const wrap = document.createElement('div');
-    wrap.className = 'rounded-xl border border-slate-700 bg-sky-950 overflow-hidden';
+    wrap.className = 'rounded-xl border border-slate-700 bg-slate-950 overflow-hidden';
     wrap.appendChild(this.svg);
 
     container.appendChild(wrap);
@@ -103,6 +142,22 @@ export class MapRenderer {
   /** Enables dragging units from one territory onto an adjacent one. */
   setDragHandler(handler: DragHandler | null): void {
     this.dragHandler = handler;
+  }
+
+  /** Outlines a territory to show it's the one currently "opened" for an action (e.g. the unit
+   *  selection panel is showing its garrison) - pass null to clear it. */
+  setSelectedTerritory(territoryId: string | null): void {
+    this.selectionLayer.replaceChildren();
+    if (!territoryId) return;
+    const territory = this.territoriesById.get(territoryId);
+    if (!territory) return;
+    const outline = document.createElementNS(SVG_NS, 'path');
+    outline.setAttribute('d', territory.path);
+    outline.setAttribute('fill', 'none');
+    outline.setAttribute('stroke', SELECTED_STROKE);
+    outline.setAttribute('stroke-width', SELECTED_STROKE_WIDTH);
+    outline.setAttribute('vector-effect', 'non-scaling-stroke');
+    this.selectionLayer.appendChild(outline);
   }
 
   /** Colors territories by owner, marks capitals, and labels garrison sizes. Pass null to reset. */
@@ -123,24 +178,72 @@ export class MapRenderer {
     if (!gameState) return;
     this.drawMarkers(gameState.players.map((p) => ({ capitalId: p.capitalId, color: p.color })), false);
     for (const [id, state] of gameState.territoryState) {
-      const total = totalUnits(state.garrison);
-      if (total === 0) continue;
-      const available = total - totalUnits(state.movedIn);
-      this.drawLabel(id, available < total ? `${available}/${total}` : String(total));
+      if (totalUnits(state.garrison) === 0) continue;
+      this.drawGarrisonLabel(id, state.garrison, subtractGarrisons(state.garrison, state.movedIn));
     }
   }
 
-  /** Colors territories by their Rüstungspunkte-Wert (see engine/economy.ts) as a heatmap and
-   *  labels each with its value - independent of ownership or any other game state. */
-  applyResourceView(territories: readonly Territory[]): void {
-    const values = territories.map((t) => resourceValue(t.id));
+  /** Colors territories by their current Rüstungspunkte-Wert (base value plus factories built
+   *  there, see engine/economy.ts) as a heatmap and labels each with its value. */
+  applyResourceView(gameState: GameState, territories: readonly Territory[]): void {
+    const values = territories.map((t) => resourceValue(gameState, t.id));
     const min = Math.min(...values);
     const max = Math.max(...values);
     const colorByTerritory = new Map<string, string>();
-    for (const t of territories) colorByTerritory.set(t.id, resourceHeatColor(resourceValue(t.id), min, max));
+    for (const t of territories) colorByTerritory.set(t.id, resourceHeatColor(resourceValue(gameState, t.id), min, max));
     this.paint(colorByTerritory);
     this.markerLayer.replaceChildren();
-    for (const t of territories) this.drawLabel(t.id, String(resourceValue(t.id)));
+    for (const t of territories) this.drawLabel(t.id, String(resourceValue(gameState, t.id)));
+  }
+
+  /** Colors territories by `viewerId`'s diplomatic relation with each owner: their own ground
+   *  green, anyone they hold an active pact with blue, anyone they're at war with red - unoccupied
+   *  territories fall through to the usual NEUTRAL_COLOR grey (see `paint`). A rival at plain peace
+   *  (no pact, no war) gets a muted neutral tone distinct from "unowned" - not one of the 4 states
+   *  asked for, but leaving it identical to unowned ground would hide real ownership information. */
+  applyDiplomacyView(gameState: GameState, viewerId: string): void {
+    this.currentGameState = gameState;
+    const colorByTerritory = new Map<string, string>();
+    for (const [id, state] of gameState.territoryState) {
+      if (state.ownerId === null) continue; // stays NEUTRAL_COLOR
+      if (state.ownerId === viewerId) {
+        colorByTerritory.set(id, DIPLOMACY_OWN_COLOR);
+        continue;
+      }
+      const relation = getRelation(gameState, viewerId, state.ownerId);
+      if (relation.atWar) colorByTerritory.set(id, DIPLOMACY_WAR_COLOR);
+      else if (relation.pact?.active) colorByTerritory.set(id, DIPLOMACY_ALLY_COLOR);
+      else colorByTerritory.set(id, DIPLOMACY_PEACE_COLOR);
+    }
+    this.paint(colorByTerritory);
+    this.markerLayer.replaceChildren();
+    this.drawMarkers(gameState.players.map((p) => ({ capitalId: p.capitalId, color: p.color })), false);
+  }
+
+  /** Colors territories by `viewerId`'s Jäger presence there relative to every other player's
+   *  combined (green = all theirs, red = all the rival(s)', grey = neither side has any Jäger
+   *  projectable there at all - see airSuperiorityColor/engine/airforce.ts's projectableFightersAt)
+   *  instead of by owner - "die Farben der Karte sollen am Verhältnis der Flugzeuge dargestellt
+   *  werden und nicht am Besitzer des Feldes". Still labels every territory that has a Flugplatz
+   *  with its level and currently-stationed aircraft, same as before. */
+  applyAirforceView(gameState: GameState, territories: readonly Territory[], viewerId: string): void {
+    this.currentGameState = gameState;
+    const colorByTerritory = new Map<string, string>();
+    for (const t of territories) {
+      const myFighters = projectableFightersAt(gameState, t.id, viewerId, territories);
+      const enemyFighters = gameState.players
+        .filter((p) => p.id !== viewerId)
+        .reduce((sum, p) => sum + projectableFightersAt(gameState, t.id, p.id, territories), 0);
+      const color = airSuperiorityColor(myFighters, enemyFighters);
+      if (color) colorByTerritory.set(t.id, color);
+    }
+    this.paint(colorByTerritory);
+    this.markerLayer.replaceChildren();
+    this.drawMarkers(gameState.players.map((p) => ({ capitalId: p.capitalId, color: p.color })), false);
+    for (const [id, airfield] of gameState.airfields) {
+      if (airfield.level === 0) continue;
+      this.drawAirfieldLabel(id, airfield);
+    }
   }
 
   /** Colors territories by lobby claims (pre-game) and marks each claimed capital so far. */
@@ -207,6 +310,116 @@ export class MapRenderer {
     label.setAttribute('paint-order', 'stroke');
     label.textContent = text;
     this.markerLayer.appendChild(label);
+  }
+
+  /** One line per unit type actually present at this territory - icon + count (or
+   *  "available/total" once some of that type have moved this round) - stacked and centered on
+   *  the territory's centroid, same convention as the tactical battle grid's tiles. */
+  private drawGarrisonLabel(territoryId: string, total: UnitComposition, available: UnitComposition): void {
+    const territory = this.territoriesById.get(territoryId);
+    if (!territory) return;
+    const [rawCx, rawCy] = territory.centroid;
+    const cx = rawCx ?? 0;
+    const cy = rawCy ?? 0;
+
+    const types = UNIT_TYPES.filter((type) => total[type] > 0);
+    if (types.length === 0) return;
+
+    const lineHeight = 0.7;
+    const iconSize = 0.46;
+    const gap = 0.1;
+    const startY = cy + 0.5 - ((types.length - 1) * lineHeight) / 2;
+
+    types.forEach((type, i) => {
+      const y = startY + i * lineHeight;
+      const count = total[type];
+      const avail = available[type];
+      const text = avail < count ? `${avail}/${count}` : String(count);
+
+      const icon = document.createElementNS(SVG_NS, 'g');
+      const scale = iconSize / 16;
+      icon.setAttribute('transform', `translate(${cx - gap / 2 - iconSize}, ${y - iconSize / 2 - 0.13}) scale(${scale})`);
+      icon.setAttribute('fill', 'white');
+      icon.setAttribute('stroke', 'black');
+      icon.setAttribute('stroke-width', '1.4');
+      icon.setAttribute('paint-order', 'stroke');
+      icon.innerHTML = UNIT_ICON_PATHS[type];
+      this.markerLayer.appendChild(icon);
+
+      const label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('x', String(cx + gap / 2));
+      label.setAttribute('y', String(y));
+      label.setAttribute('text-anchor', 'start');
+      label.setAttribute('font-size', '0.56');
+      label.setAttribute('font-weight', '700');
+      label.setAttribute('fill', 'white');
+      label.setAttribute('stroke', 'black');
+      label.setAttribute('stroke-width', '0.055');
+      label.setAttribute('paint-order', 'stroke');
+      label.textContent = text;
+      this.markerLayer.appendChild(label);
+    });
+  }
+
+  /** A territory's Flugplatz label: its level on one line above the centroid, then - one row per
+   *  aircraft type actually stationed there right now - an icon+count row per type, same
+   *  icon-then-number convention as drawGarrisonLabel's per-unit-type rows (rather than the old
+   *  compact "J0 C0 B0" text line). */
+  private drawAirfieldLabel(territoryId: string, airfield: AirfieldState): void {
+    const territory = this.territoriesById.get(territoryId);
+    if (!territory) return;
+    const [rawCx, rawCy] = territory.centroid;
+    const cx = rawCx ?? 0;
+    const cy = rawCy ?? 0;
+
+    const levelLabel = document.createElementNS(SVG_NS, 'text');
+    levelLabel.setAttribute('x', String(cx));
+    levelLabel.setAttribute('y', String(cy - 0.65));
+    levelLabel.setAttribute('text-anchor', 'middle');
+    levelLabel.setAttribute('font-size', '0.38');
+    levelLabel.setAttribute('font-weight', '700');
+    levelLabel.setAttribute('fill', '#facc15');
+    levelLabel.setAttribute('stroke', 'black');
+    levelLabel.setAttribute('stroke-width', '0.05');
+    levelLabel.setAttribute('paint-order', 'stroke');
+    levelLabel.textContent = `✈ Lvl ${airfield.level}`;
+    this.markerLayer.appendChild(levelLabel);
+
+    const types = AIRCRAFT_TYPES.filter((type) => airfield.aircraft[type] > 0);
+    if (types.length === 0) return;
+
+    const lineHeight = 0.5;
+    const iconSize = 0.38;
+    const gap = 0.08;
+    const startY = cy - 0.15;
+
+    types.forEach((type, i) => {
+      const y = startY + i * lineHeight;
+      const count = airfield.aircraft[type];
+
+      const icon = document.createElementNS(SVG_NS, 'g');
+      const scale = iconSize / 16;
+      icon.setAttribute('transform', `translate(${cx - gap / 2 - iconSize}, ${y - iconSize / 2 - 0.11}) scale(${scale})`);
+      icon.setAttribute('fill', 'white');
+      icon.setAttribute('stroke', 'black');
+      icon.setAttribute('stroke-width', '1.4');
+      icon.setAttribute('paint-order', 'stroke');
+      icon.innerHTML = AIRCRAFT_ICON_PATHS[type];
+      this.markerLayer.appendChild(icon);
+
+      const label = document.createElementNS(SVG_NS, 'text');
+      label.setAttribute('x', String(cx + gap / 2));
+      label.setAttribute('y', String(y));
+      label.setAttribute('text-anchor', 'start');
+      label.setAttribute('font-size', '0.46');
+      label.setAttribute('font-weight', '700');
+      label.setAttribute('fill', 'white');
+      label.setAttribute('stroke', 'black');
+      label.setAttribute('stroke-width', '0.048');
+      label.setAttribute('paint-order', 'stroke');
+      label.textContent = String(count);
+      this.markerLayer.appendChild(label);
+    });
   }
 
   private onEnter(territory: Territory): void {

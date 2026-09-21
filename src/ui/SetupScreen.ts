@@ -1,4 +1,4 @@
-import type { GameState, LobbyState, Territory, TerritoryData } from '../engine/types';
+import type { AiDifficulty, GameState, LobbyState, Territory, TerritoryData } from '../engine/types';
 import { MIN_FACTIONS, MAX_FACTIONS } from '../engine/palette';
 import { canStart } from '../engine/session';
 import { MapRenderer } from '../render/MapRenderer';
@@ -14,6 +14,12 @@ const primaryBtnClass =
 const secondaryBtnClass =
   'rounded-md border border-slate-600 bg-slate-800 px-4 py-1.5 text-sm font-semibold text-slate-100 hover:bg-slate-700';
 const cardClass = 'rounded-lg border border-slate-700 bg-slate-800/60 p-6';
+
+const DIFFICULTY_LABELS: Record<AiDifficulty, string> = {
+  easy: 'Einfach',
+  medium: 'Mittel',
+  hard: 'Schwer',
+};
 
 export class SetupScreen {
   private readonly root: HTMLElement;
@@ -82,6 +88,7 @@ export class SetupScreen {
   private renderOfflineConfig(): void {
     this.clear();
     let factionCount = 4;
+    let aiDifficulty: AiDifficulty = 'medium';
     const { card, nameInput } = this.renderPlayerAndCountForm(
       'Gegen den Computer spielen',
       'Anzahl Fraktionen:',
@@ -89,6 +96,7 @@ export class SetupScreen {
       () => factionCount,
       (n) => { factionCount = n; },
     );
+    card.appendChild(this.renderDifficultySelector(() => aiDifficulty, (d) => { aiDifficulty = d; }));
 
     const startBtn = document.createElement('button');
     startBtn.type = 'button';
@@ -96,7 +104,7 @@ export class SetupScreen {
     startBtn.className = primaryBtnClass;
     startBtn.addEventListener('click', () => {
       const name = nameInput.value.trim() || 'Spieler 1';
-      this.client = new LocalGameClient(this.territories, name, factionCount - 1);
+      this.client = new LocalGameClient(this.territories, name, factionCount - 1, aiDifficulty);
       this.enterLobby();
     });
 
@@ -138,6 +146,7 @@ export class SetupScreen {
   private renderOnlineHostConfig(): void {
     this.clear();
     let maxHumans = 4;
+    let aiDifficulty: AiDifficulty = 'medium';
     const { card, nameInput } = this.renderPlayerAndCountForm(
       'Session erstellen',
       'Wie viele Spieler dürfen beitreten:',
@@ -145,6 +154,7 @@ export class SetupScreen {
       () => maxHumans,
       (n) => { maxHumans = n; },
     );
+    card.appendChild(this.renderDifficultySelector(() => aiDifficulty, (d) => { aiDifficulty = d; }));
     const hint = document.createElement('p');
     hint.className = 'text-sm text-slate-400';
     hint.textContent = 'Computer-Gegner kannst du danach direkt in der Lobby hinzufügen.';
@@ -156,7 +166,7 @@ export class SetupScreen {
     createBtn.className = primaryBtnClass;
     createBtn.addEventListener('click', () => {
       const name = nameInput.value.trim() || 'Host';
-      this.client = new RemoteGameClient(resolveWsUrl(), { name, maxHumans });
+      this.client = new RemoteGameClient(resolveWsUrl(), { name, maxHumans, aiDifficulty });
       this.enterLobby();
     });
 
@@ -257,6 +267,44 @@ export class SetupScreen {
     return { card, nameInput, countLabel, bumpCount };
   }
 
+  /** "Einfach"/"Mittel"/"Schwer" toggle row for engine/types.ts's AiDifficulty - "am Spielbeginn
+   *  einstellen, wie gut die KI ist". One choice for the whole lobby (see LobbyState.aiDifficulty),
+   *  not per AI seat, so this appears once, alongside the offline faction count or the online
+   *  host's max-player count, rather than per "+ KI hinzufügen" click. */
+  private renderDifficultySelector(getDifficulty: () => AiDifficulty, setDifficulty: (d: AiDifficulty) => void): HTMLDivElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'flex flex-col gap-1.5';
+
+    const label = document.createElement('span');
+    label.textContent = 'KI-Schwierigkeit:';
+    label.className = 'text-sm text-slate-300';
+
+    const row = document.createElement('div');
+    row.className = 'flex gap-2';
+
+    const buttons = new Map<AiDifficulty, HTMLButtonElement>();
+    const refresh = (): void => {
+      for (const [level, btn] of buttons) {
+        btn.className = level === getDifficulty() ? primaryBtnClass : secondaryBtnClass;
+      }
+    };
+    for (const level of ['easy', 'medium', 'hard'] as const) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = DIFFICULTY_LABELS[level];
+      btn.addEventListener('click', () => {
+        setDifficulty(level);
+        refresh();
+      });
+      buttons.set(level, btn);
+      row.appendChild(btn);
+    }
+    refresh();
+
+    wrap.append(label, row);
+    return wrap;
+  }
+
   private backRow(onBack?: () => void): HTMLDivElement {
     const row = document.createElement('div');
     const btn = document.createElement('button');
@@ -292,6 +340,9 @@ export class SetupScreen {
     addAiBtn.className = secondaryBtnClass;
     addAiBtn.addEventListener('click', () => client.addAi());
 
+    const difficultyLabel = document.createElement('p');
+    difficultyLabel.className = 'hidden text-sm text-slate-400';
+
     const hint = document.createElement('p');
     hint.className = 'text-sm text-slate-400';
     hint.textContent = 'Klicke auf der Karte ein Gebiet, um es als deine Hauptstadt festzulegen.';
@@ -309,7 +360,7 @@ export class SetupScreen {
     startBtn.addEventListener('click', () => client.start());
     actionRow.appendChild(startBtn);
 
-    wrap.append(status, errorBanner, slotList, addAiBtn, hint, mapContainer, actionRow);
+    wrap.append(status, errorBanner, slotList, addAiBtn, difficultyLabel, hint, mapContainer, actionRow);
     this.root.appendChild(wrap);
 
     const showError = (message: string): void => {
@@ -340,6 +391,9 @@ export class SetupScreen {
         const onRemove = client.isOnline && host ? () => client.removeAi(ai.id) : undefined;
         slotList.appendChild(this.renderSlotChip(ai.color, ai.name, ai.capitalId, [], onRemove));
       }
+
+      difficultyLabel.classList.toggle('hidden', lobby.aiSlots.length === 0);
+      difficultyLabel.textContent = `KI-Schwierigkeit: ${DIFFICULTY_LABELS[lobby.aiDifficulty]}`;
 
       const canAddMore = lobby.slots.length + lobby.aiSlots.length < MAX_FACTIONS;
       addAiBtn.classList.toggle('hidden', !(client.isOnline && host));

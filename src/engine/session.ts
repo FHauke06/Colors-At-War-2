@@ -1,6 +1,7 @@
-import type { AiSlot, GameState, GameStateWire, LobbySlot, LobbyState, Territory } from './types';
+import type { AiDifficulty, AiSlot, DiplomacyState, DiplomacyStateWire, GameState, GameStateWire, LobbySlot, LobbyState, PendingBattle, PendingBattleWire, Territory } from './types';
 import { FACTION_COLORS, MAX_FACTIONS } from './palette';
 import { pickCapitals } from './setup';
+import { randomAiName } from './aiNames';
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I/L - avoids typos when shared aloud
 
@@ -36,7 +37,13 @@ function claimedTerritories(lobby: LobbyState, territories: readonly Territory[]
   return territories.filter((t) => ids.has(t.id));
 }
 
-export function createLobby(code: string, maxHumans: number, hostId: string, hostName: string): LobbyState {
+export function createLobby(
+  code: string,
+  maxHumans: number,
+  hostId: string,
+  hostName: string,
+  aiDifficulty: AiDifficulty = 'medium',
+): LobbyState {
   if (maxHumans < 1 || maxHumans > MAX_FACTIONS) {
     throw new Error(`maxHumans must be between 1 and ${MAX_FACTIONS}`);
   }
@@ -47,7 +54,7 @@ export function createLobby(code: string, maxHumans: number, hostId: string, hos
     capitalId: null,
     isHost: true,
   };
-  return { code, maxHumans, slots: [host], aiSlots: [], status: 'lobby' };
+  return { code, maxHumans, slots: [host], aiSlots: [], status: 'lobby', aiDifficulty };
 }
 
 export function addSlot(lobby: LobbyState, playerId: string, name: string): LobbyState {
@@ -88,7 +95,8 @@ export function addAi(lobby: LobbyState, territories: readonly Territory[]): Lob
   const [capital] = pickCapitals(territories, 1, claimedTerritories(lobby, territories));
   if (!capital) throw new Error('Keine freien Gebiete für eine weitere KI.');
 
-  const ai: AiSlot = { id: `ai-${randomId()}`, name: `KI ${lobby.aiSlots.length + 1}`, color: nextColor(lobby), capitalId: capital.id };
+  const usedNames = new Set([...lobby.slots.map((s) => s.name), ...lobby.aiSlots.map((a) => a.name)]);
+  const ai: AiSlot = { id: `ai-${randomId()}`, name: randomAiName(usedNames), color: nextColor(lobby), capitalId: capital.id };
   return { ...lobby, aiSlots: [...lobby.aiSlots, ai] };
 }
 
@@ -106,6 +114,24 @@ export function canStart(lobby: LobbyState): boolean {
   );
 }
 
+function serializePendingBattle(pending: PendingBattle | null): PendingBattleWire | null {
+  if (!pending) return null;
+  return { ...pending, subState: pending.subState ? [...pending.subState.entries()] : null };
+}
+
+function deserializePendingBattle(wire: PendingBattleWire | null): PendingBattle | null {
+  if (!wire) return null;
+  return { ...wire, subState: wire.subState ? new Map(wire.subState) : null };
+}
+
+function serializeDiplomacy(state: DiplomacyState): DiplomacyStateWire {
+  return { relations: [...state.relations.entries()], pactProposals: [...state.pactProposals] };
+}
+
+function deserializeDiplomacy(wire: DiplomacyStateWire): DiplomacyState {
+  return { relations: new Map(wire.relations), pactProposals: new Set(wire.pactProposals) };
+}
+
 export function serializeGameState(state: GameState): GameStateWire {
   return {
     turn: state.turn,
@@ -113,6 +139,12 @@ export function serializeGameState(state: GameState): GameStateWire {
     players: state.players,
     territoryState: [...state.territoryState.entries()],
     resources: [...state.resources.entries()],
+    development: [...state.development.entries()],
+    diplomacy: serializeDiplomacy(state.diplomacy),
+    stats: [...state.stats.entries()],
+    airfields: [...state.airfields.entries()],
+    research: [...state.research.entries()],
+    pendingBattle: serializePendingBattle(state.pendingBattle),
   };
 }
 
@@ -123,5 +155,11 @@ export function deserializeGameState(wire: GameStateWire): GameState {
     players: wire.players,
     territoryState: new Map(wire.territoryState),
     resources: new Map(wire.resources),
+    development: new Map(wire.development),
+    diplomacy: deserializeDiplomacy(wire.diplomacy),
+    stats: new Map(wire.stats),
+    airfields: new Map(wire.airfields),
+    research: new Map(wire.research),
+    pendingBattle: deserializePendingBattle(wire.pendingBattle),
   };
 }
