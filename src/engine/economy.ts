@@ -1,26 +1,30 @@
 import type { GameState, TerritoryDevelopment, UnitComposition } from './types';
 import { addGarrisons, totalUnits } from './movement';
-import { isGroundUnlocked } from './research';
+import { isGroundUnlocked, isSupportUnlocked } from './research';
 
-const GROUND_TECH_LABEL: Record<keyof UnitComposition, string> = {
+const UNIT_LABEL: Record<keyof UnitComposition, string> = {
   infantry: 'Infanterie',
   lightTank: 'Leichte Panzer',
   heavyTank: 'Schwere Panzer',
   artillery: 'Artillerie',
+  motorizedInfantry: 'Motorisierte Infanterie',
 };
 
 /** Cost in Rüstungspunkte per unit - scaled from the 5:2:1 Infanterie:Leichter-Panzer:Schwerer-
  *  Panzer Stärkeverhältnis (Stärke 1 : 2.5 : 5), doubled to keep costs whole numbers. Artillery
  *  costs the same as a light tank - it carries no ordinary battle strength at all, its value is
- *  entirely in the ranged bombardment action (see engine/combat.ts's bombardBattleCell). */
-export const UNIT_COSTS: UnitComposition = { infantry: 2, lightTank: 5, heavyTank: 10, artillery: 5 };
+ *  entirely in the ranged bombardment action (see engine/combat.ts's bombardBattleCell).
+ *  Motorisierte Infanterie costs double plain Infanterie for the same combat strength - its value
+ *  is entirely in mobility (see UnitComposition's doc comment). */
+export const UNIT_COSTS: UnitComposition = { infantry: 2, lightTank: 5, heavyTank: 10, artillery: 5, motorizedInfantry: 4 };
 
 export function costOf(amount: UnitComposition): number {
   return (
     amount.infantry * UNIT_COSTS.infantry +
     amount.lightTank * UNIT_COSTS.lightTank +
     amount.heavyTank * UNIT_COSTS.heavyTank +
-    amount.artillery * UNIT_COSTS.artillery
+    amount.artillery * UNIT_COSTS.artillery +
+    amount.motorizedInfantry * UNIT_COSTS.motorizedInfantry
   );
 }
 
@@ -102,10 +106,13 @@ export function recruitUnits(
   if (!state || state.ownerId !== playerId) return { ok: false, reason: 'Das Gebiet gehört dir nicht.' };
   if (totalUnits(amount) === 0) return { ok: false, reason: 'Keine Einheiten ausgewählt.' };
 
-  for (const type of ['lightTank', 'heavyTank', 'artillery'] as const) {
+  for (const type of ['lightTank', 'heavyTank', 'motorizedInfantry'] as const) {
     if (amount[type] > 0 && !isGroundUnlocked(gameState, playerId, type)) {
-      return { ok: false, reason: `${GROUND_TECH_LABEL[type]} noch nicht erforscht.` };
+      return { ok: false, reason: `${UNIT_LABEL[type]} noch nicht erforscht.` };
     }
+  }
+  if (amount.artillery > 0 && !isSupportUnlocked(gameState, playerId, 'artillery')) {
+    return { ok: false, reason: `${UNIT_LABEL.artillery} noch nicht erforscht.` };
   }
 
   const cost = costOf(amount);
@@ -117,6 +124,7 @@ export function recruitUnits(
     ownerId: playerId,
     garrison: addGarrisons(state.garrison, amount),
     movedIn: addGarrisons(state.movedIn, amount),
+    extraMoveUsed: state.extraMoveUsed,
   });
 
   const resources = new Map(gameState.resources);

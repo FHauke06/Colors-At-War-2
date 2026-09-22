@@ -1,4 +1,4 @@
-import type { AirComposition, AirTech, BattlePlacement, BattleSubTerritory, CalledAircraft, GameState, GroundTech, PendingBattle, TerritoryData, UnitComposition } from '../engine/types';
+import type { AirComposition, AirTech, BattlePlacement, BattleSubTerritory, CalledAircraft, GameState, GroundTech, PendingBattle, SupportTech, TerritoryData, UnitComposition } from '../engine/types';
 import { totalUnits, availableToMove, addGarrisons, subtractGarrisons } from '../engine/movement';
 import { isEliminated, isGameOver, gameWinner, territoryStandings, remainingPlayers } from '../engine/victory';
 import { statsFor, totalTroopsFor, totalFactoriesFor } from '../engine/stats';
@@ -12,7 +12,7 @@ import {
   INFRASTRUCTURE_COST,
   MAX_INFRASTRUCTURE_LEVEL,
 } from '../engine/economy';
-import { battleStrength, GRID_SIZE, MAX_BATTLE_ROUNDS, ARTILLERY_RANGE, STRENGTH, subTerritoryDistance, battleAirSuperiority } from '../engine/combat';
+import { battleStrength, GRID_SIZE, MAX_BATTLE_ROUNDS, ARTILLERY_RANGE, NUKE_USE_COST, SIMULATED_DEFENSE_MULTIPLIER, STRENGTH, subTerritoryDistance, battleAirSuperiority } from '../engine/combat';
 import type { BattleResult } from '../engine/combat';
 import { areAtWar, getRelation, hasPendingProposal } from '../engine/diplomacy';
 import {
@@ -32,7 +32,7 @@ import {
   territoryDistance,
 } from '../engine/airforce';
 import type { BomberRaidMode } from '../engine/airforce';
-import { GROUND_TECH_TREE, AIR_TECH_TREE, isGroundUnlocked, isAirUnlocked } from '../engine/research';
+import { GROUND_TECH_TREE, AIR_TECH_TREE, SUPPORT_TECH_TREE, isGroundUnlocked, isAirUnlocked, isSupportUnlocked } from '../engine/research';
 import { MapRenderer } from '../render/MapRenderer';
 import { UNIT_ICON_PATHS, UNIT_LABELS, UNIT_TYPES } from '../render/unitIcons';
 import { AIRCRAFT_ICON_PATHS, AIRCRAFT_LABELS, AIRCRAFT_TYPES } from '../render/aircraftIcons';
@@ -56,7 +56,7 @@ const RESEARCH_HINT =
 const GROUND_TECH_STATS: Record<GroundTech, string> = {
   lightTank: `Stärke ${STRENGTH.lightTank} (Infanterie = ${STRENGTH.infantry}) — Rekrutierung: ${UNIT_COSTS.lightTank} Pkt./Einheit`,
   heavyTank: `Stärke ${STRENGTH.heavyTank} — Rekrutierung: ${UNIT_COSTS.heavyTank} Pkt./Einheit`,
-  artillery: `Kein gewöhnlicher Kampfwert — Fernbeschuss bis ${ARTILLERY_RANGE} Felder im Kampf, bis zu 1 Infanterie pro Artillerie — Rekrutierung: ${UNIT_COSTS.artillery} Pkt./Einheit`,
+  motorizedInfantry: `Stärke ${STRENGTH.motorizedInfantry} (wie Infanterie) — bewegt sich bis zu 2× pro Runde/Kampfzug, auf Hauptkarte und Schlachtfeld — Rekrutierung: ${UNIT_COSTS.motorizedInfantry} Pkt./Einheit`,
 };
 
 /** Hover-tooltip text for each researchable aircraft type - see engine/research.ts's AIR_TECH_TREE. */
@@ -64,6 +64,15 @@ const AIR_TECH_STATS: Record<AirTech, string> = {
   fighters: `Rekrutierung: ${AIRCRAFT_COST_PER_100.fighters} Pkt./100 — kämpft um Luftüberlegenheit (Basis-Killrate ${FIGHTER_BASE_KILL_RATE} pro Jäger, quadratisch mit eigener Überzahl)`,
   cas: `Rekrutierung: ${AIRCRAFT_COST_PER_100.cas} Pkt./100 — ${CAS_STRIKE_DAMAGE_PER_UNIT} Schaden pro Einsatz (1 Einheit besiegt 10 Infanterie) — nur einsetzbar über ${Math.round(CAS_MIN_AIR_SUPERIORITY * 100)}% Luftüberlegenheit`,
   bombers: `Rekrutierung: ${AIRCRAFT_COST_PER_100.bombers} Pkt./100 — Rückkehrquote entspricht der eigenen Luftüberlegenheit am Ziel. Wähle beim Angriff das Ziel: Einheiten (100 Bomber = ${Math.round(100 * BOMBER_DAMAGE_PER_UNIT)} Stärke) oder Fabriken (100 Bomber = ${Math.round(100 * FACTORY_DAMAGE_PER_BOMBER)} Fabriken)`,
+};
+
+/** Support weapons don't fit the ground/air split - see engine/research.ts's SUPPORT_TECH_TREE. */
+const SUPPORT_TECH_LABELS: Record<SupportTech, string> = { artillery: UNIT_LABELS.artillery, nuke: 'Atombombe' };
+
+/** Hover-tooltip text for engine/research.ts's SUPPORT_TECH_TREE. */
+const SUPPORT_TECH_STATS: Record<SupportTech, string> = {
+  artillery: `Kein gewöhnlicher Kampfwert — Fernbeschuss bis ${ARTILLERY_RANGE} Felder im Kampf, bis zu 1 Infanterie pro Artillerie — Rekrutierung: ${UNIT_COSTS.artillery} Pkt./Einheit`,
+  nuke: `Einsatz im taktischen Kampf: ${NUKE_USE_COST} Pkt./Bombe — zerstört ALLE Einheiten in der Schlacht, auch die eigenen, und beendet den Kampf sofort ohne Sieger`,
 };
 
 const primaryBtnClass =
@@ -115,13 +124,26 @@ function createAircraftIcon(type: keyof AirComposition, className = 'h-3.5 w-3.5
   return svg;
 }
 
+/** A small mushroom-cloud silhouette - same hand-drawn-pictogram style as UNIT_ICON_PATHS/
+ *  AIRCRAFT_ICON_PATHS, just a one-off for the Atombombe specifically (Artillerie, the other
+ *  SupportTech, already has its own UNIT_ICON_PATHS entry) rather than a Record keyed by type. */
+function createNukeIcon(className = 'h-3.5 w-3.5 shrink-0'): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('fill', 'currentColor');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.classList.add(...className.split(' '));
+  svg.innerHTML = '<circle cx="8" cy="5" r="4.2"/><path d="M6 8.3h4l1.4 6.5h-6.8z"/>';
+  return svg;
+}
+
 function describeComposition(c: UnitComposition): string {
   const parts = UNIT_TYPES.filter((t) => c[t] > 0).map((t) => `${c[t]} ${UNIT_LABELS[t]}`);
   return parts.length > 0 ? parts.join(', ') : '–';
 }
 
 function emptyComposition(): UnitComposition {
-  return { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0 };
+  return { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 };
 }
 
 function sumCompositions(items: readonly UnitComposition[]): UnitComposition {
@@ -427,12 +449,16 @@ export class GameScreen {
     airBtn.type = 'button';
     airBtn.textContent = 'Flugzeuge';
     airBtn.className = secondaryBtnClass;
-    subTabRow.append(groundBtn, airBtn);
+    const supportBtn = document.createElement('button');
+    supportBtn.type = 'button';
+    supportBtn.textContent = 'Support';
+    supportBtn.className = secondaryBtnClass;
+    subTabRow.append(groundBtn, airBtn, supportBtn);
 
     const grid = document.createElement('div');
     grid.className = 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3';
 
-    let subTab: 'ground' | 'air' = 'ground';
+    let subTab: 'ground' | 'air' | 'support' = 'ground';
 
     const refresh = (): void => {
       grid.replaceChildren();
@@ -440,7 +466,7 @@ export class GameScreen {
       const points = this.currentGameState.resources.get(myId) ?? 0;
 
       if (subTab === 'ground') {
-        for (const tech of ['lightTank', 'artillery', 'heavyTank'] as const) {
+        for (const tech of ['lightTank', 'heavyTank', 'motorizedInfantry'] as const) {
           const def = GROUND_TECH_TREE[tech];
           grid.appendChild(
             this.buildTechCard({
@@ -456,7 +482,7 @@ export class GameScreen {
             }),
           );
         }
-      } else {
+      } else if (subTab === 'air') {
         for (const tech of ['fighters', 'cas', 'bombers'] as const) {
           const def = AIR_TECH_TREE[tech];
           grid.appendChild(
@@ -473,21 +499,36 @@ export class GameScreen {
             }),
           );
         }
+      } else {
+        for (const tech of ['artillery', 'nuke'] as const) {
+          const def = SUPPORT_TECH_TREE[tech];
+          grid.appendChild(
+            this.buildTechCard({
+              icon: tech === 'artillery' ? createUnitIcon('artillery', 'h-5 w-5 shrink-0') : createNukeIcon('h-5 w-5 shrink-0'),
+              label: SUPPORT_TECH_LABELS[tech],
+              cost: def.cost,
+              requiresLabel: def.requires ? SUPPORT_TECH_LABELS[def.requires] : null,
+              statsText: SUPPORT_TECH_STATS[tech],
+              unlocked: isSupportUnlocked(this.currentGameState, myId, tech),
+              prereqMet: !def.requires || isSupportUnlocked(this.currentGameState, myId, def.requires),
+              canAfford: points >= def.cost,
+              onUnlock: () => this.client.unlockSupportTech(tech),
+            }),
+          );
+        }
       }
     };
 
-    groundBtn.addEventListener('click', () => {
-      subTab = 'ground';
-      groundBtn.className = primaryBtnClass;
-      airBtn.className = secondaryBtnClass;
+    const activateTab = (tab: 'ground' | 'air' | 'support'): void => {
+      subTab = tab;
+      groundBtn.className = tab === 'ground' ? primaryBtnClass : secondaryBtnClass;
+      airBtn.className = tab === 'air' ? primaryBtnClass : secondaryBtnClass;
+      supportBtn.className = tab === 'support' ? primaryBtnClass : secondaryBtnClass;
       refresh();
-    });
-    airBtn.addEventListener('click', () => {
-      subTab = 'air';
-      airBtn.className = primaryBtnClass;
-      groundBtn.className = secondaryBtnClass;
-      refresh();
-    });
+    };
+    groundBtn.addEventListener('click', () => activateTab('ground'));
+    airBtn.addEventListener('click', () => activateTab('air'));
+    supportBtn.addEventListener('click', () => activateTab('support'));
 
     el.append(subTabRow, grid);
     return { el, refresh };
@@ -1187,13 +1228,21 @@ export class GameScreen {
     airSupportBtn.type = 'button';
     airSupportBtn.textContent = 'Luftunterstützung';
     airSupportBtn.className = secondaryBtnClass;
+    const nukeUnlocked = isSupportUnlocked(this.currentGameState, myId, 'nuke');
+    const myPoints = this.currentGameState.resources.get(myId) ?? 0;
+    const nukeBtn = document.createElement('button');
+    nukeBtn.type = 'button';
+    nukeBtn.textContent = 'Atombombe einsetzen';
+    nukeBtn.className = `${secondaryBtnClass}${nukeUnlocked ? '' : ' hidden'}`;
+    nukeBtn.disabled = !isMyBattleTurn || myPoints < NUKE_USE_COST;
+    nukeBtn.addEventListener('click', () => this.openNukeConfirm());
     const endBattleTurnBtn = document.createElement('button');
     endBattleTurnBtn.type = 'button';
     endBattleTurnBtn.textContent = 'Kampfzug beenden';
     endBattleTurnBtn.className = primaryBtnClass;
     endBattleTurnBtn.disabled = !isMyBattleTurn;
     endBattleTurnBtn.addEventListener('click', () => this.client.endBattleTurn());
-    actionBtns.append(bombardBtn, airSupportBtn, endBattleTurnBtn);
+    actionBtns.append(bombardBtn, airSupportBtn, nukeBtn, endBattleTurnBtn);
     statusRow.append(statusText, actionBtns);
     this.tacticalView.appendChild(statusRow);
 
@@ -2034,6 +2083,39 @@ export class GameScreen {
     card.appendChild(actions);
   }
 
+  /** Confirmation gate in front of GameClient.useNuke() - the one battle action that destroys the
+   *  caller's own units too, so it gets a dedicated "are you sure" modal instead of firing
+   *  straight off the button click like bombardBattleCell/moveBattleUnits do. */
+  private openNukeConfirm(): void {
+    const { card, close } = this.openModal('Atombombe einsetzen?');
+    const warning = document.createElement('p');
+    warning.className = 'text-sm text-slate-200';
+    warning.textContent =
+      `Zerstört sofort ALLE Einheiten in dieser Schlacht - auch deine eigenen - und beendet den Kampf ohne Sieger. ` +
+      `Kostet ${NUKE_USE_COST} Rüstungspunkte. Das kann nicht rückgängig gemacht werden.`;
+    card.appendChild(warning);
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = 'Abbrechen';
+    cancelBtn.className = secondaryBtnClass;
+    cancelBtn.addEventListener('click', () => close());
+
+    const confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.textContent = 'Abwerfen';
+    confirmBtn.className = primaryBtnClass;
+    confirmBtn.addEventListener('click', () => {
+      this.client.useNuke();
+      close();
+    });
+
+    const actions = document.createElement('div');
+    actions.className = 'flex justify-end gap-2 pt-2';
+    actions.append(cancelBtn, confirmBtn);
+    card.appendChild(actions);
+  }
+
   /** A lightweight "the battle is over" notice - the fight itself was watched live on the
    *  tactical map, so this is just the final tally, not a replay. */
   private showBattleConcluded(battle: BattleResult): void {
@@ -2044,9 +2126,11 @@ export class GameScreen {
     const { card, close } = this.openModal(`Kampf um ${territoryName} entschieden`);
     const verdict = document.createElement('p');
     verdict.className = 'text-sm font-semibold text-slate-100';
-    verdict.textContent = battle.attackerWon
-      ? `${attacker?.name ?? 'Der Angreifer'} hat ${defender?.name ?? 'den Verteidiger'} besiegt und erobert ${territoryName}!`
-      : `${defender?.name ?? 'Der Verteidiger'} hat den Angriff von ${attacker?.name ?? 'dem Angreifer'} abgewehrt!`;
+    verdict.textContent = battle.nuked
+      ? `Eine Atombombe hat alle Streitkräfte von ${attacker?.name ?? 'dem Angreifer'} und ${defender?.name ?? 'dem Verteidiger'} in ${territoryName} ausgelöscht - niemand hat das Gebiet erobert.`
+      : battle.attackerWon
+        ? `${attacker?.name ?? 'Der Angreifer'} hat ${defender?.name ?? 'den Verteidiger'} besiegt und erobert ${territoryName}!`
+        : `${defender?.name ?? 'Der Verteidiger'} hat den Angriff von ${attacker?.name ?? 'dem Angreifer'} abgewehrt!`;
     card.appendChild(verdict);
 
     const closeBtn = document.createElement('button');
@@ -2101,6 +2185,40 @@ export class GameScreen {
     info.className = 'text-sm text-slate-300';
     info.textContent = 'Wie möchtest du angreifen?';
     card.appendChild(info);
+
+    // Sieg-Chance bei Simulation: exactly simulateAttack's own formula (engine/combat.ts) -
+    // attackerStrength / (attackerStrength + defenderStrength * SIMULATED_DEFENSE_MULTIPLIER) -
+    // using the same available-to-move force the simulation would actually commit. Only meaningful
+    // for the simulate option; the tactical battle is played out by hand, not rolled.
+    const fromState = this.currentGameState.territoryState.get(fromId);
+    const toState = this.currentGameState.territoryState.get(toId);
+    const attackerStrength = fromState ? battleStrength(availableToMove(fromState)) : 0;
+    const defenderStrength = toState ? battleStrength(toState.garrison) * SIMULATED_DEFENSE_MULTIPLIER : 0;
+    const totalStrength = attackerStrength + defenderStrength;
+    const winChance = totalStrength > 0 ? attackerStrength / totalStrength : 0;
+    const winPercent = Math.round(winChance * 100);
+
+    const chanceWrap = document.createElement('div');
+    chanceWrap.className = 'flex flex-col gap-1';
+    const chanceLabel = document.createElement('div');
+    chanceLabel.className = 'flex items-center justify-between text-xs text-slate-400';
+    const chanceLabelText = document.createElement('span');
+    chanceLabelText.textContent = 'Sieg-Chance bei Simulation';
+    const chanceValue = document.createElement('span');
+    chanceValue.className = 'font-semibold text-slate-200';
+    chanceValue.textContent = `${winPercent}%`;
+    chanceLabel.append(chanceLabelText, chanceValue);
+
+    const chanceBarBg = document.createElement('div');
+    chanceBarBg.className = 'h-2.5 w-full overflow-hidden rounded-full bg-slate-900';
+    const chanceBarFill = document.createElement('div');
+    chanceBarFill.className = 'h-full rounded-full transition-[width]';
+    chanceBarFill.style.width = `${winPercent}%`;
+    chanceBarFill.style.background = winChance >= 0.5 ? '#16a34a' : winChance >= 0.25 ? '#eab308' : '#dc2626';
+    chanceBarBg.appendChild(chanceBarFill);
+
+    chanceWrap.append(chanceLabel, chanceBarBg);
+    card.appendChild(chanceWrap);
 
     const tacticalBtn = document.createElement('button');
     tacticalBtn.type = 'button';
@@ -2810,7 +2928,7 @@ export class GameScreen {
     const points = this.currentGameState.resources.get(this.client.playerId) ?? 0;
     const territoryName = this.data.territories.find((t) => t.id === territoryId)?.name ?? territoryId;
 
-    const amount: Record<keyof UnitComposition, number> = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0 };
+    const amount: Record<keyof UnitComposition, number> = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 };
     const { card, close } = this.openModal(territoryName);
 
     const pointsText = document.createElement('p');

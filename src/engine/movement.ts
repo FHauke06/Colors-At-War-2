@@ -1,11 +1,20 @@
-import type { GameState, Territory, TerritoryState, UnitComposition } from './types';
+import type { GameState, Territory, UnitComposition } from './types';
 import { areAtWar } from './diplomacy';
 import { addToPlayerStats } from './stats';
 
-const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0 };
+/** Structural subset shared by TerritoryState (main map) and BattleSubState (tactical grid) - the
+ *  movement/availability rules below apply identically to both, so they take this instead of
+ *  either concrete type. */
+interface MovableState {
+  readonly garrison: UnitComposition;
+  readonly movedIn: UnitComposition;
+  readonly extraMoveUsed: UnitComposition;
+}
+
+const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 };
 
 export function totalUnits(garrison: UnitComposition): number {
-  return garrison.infantry + garrison.lightTank + garrison.heavyTank + garrison.artillery;
+  return garrison.infantry + garrison.lightTank + garrison.heavyTank + garrison.artillery + garrison.motorizedInfantry;
 }
 
 export function addGarrisons(a: UnitComposition, b: UnitComposition): UnitComposition {
@@ -14,6 +23,7 @@ export function addGarrisons(a: UnitComposition, b: UnitComposition): UnitCompos
     lightTank: a.lightTank + b.lightTank,
     heavyTank: a.heavyTank + b.heavyTank,
     artillery: a.artillery + b.artillery,
+    motorizedInfantry: a.motorizedInfantry + b.motorizedInfantry,
   };
 }
 
@@ -23,6 +33,7 @@ export function subtractGarrisons(a: UnitComposition, b: UnitComposition): UnitC
     lightTank: a.lightTank - b.lightTank,
     heavyTank: a.heavyTank - b.heavyTank,
     artillery: a.artillery - b.artillery,
+    motorizedInfantry: a.motorizedInfantry - b.motorizedInfantry,
   };
 }
 
@@ -32,17 +43,40 @@ function fitsWithin(amount: UnitComposition, available: UnitComposition): boolea
     amount.lightTank >= 0 &&
     amount.heavyTank >= 0 &&
     amount.artillery >= 0 &&
+    amount.motorizedInfantry >= 0 &&
     amount.infantry <= available.infantry &&
     amount.lightTank <= available.lightTank &&
     amount.heavyTank <= available.heavyTank &&
-    amount.artillery <= available.artillery
+    amount.artillery <= available.artillery &&
+    amount.motorizedInfantry <= available.motorizedInfantry
   );
 }
 
-/** Of a territory's current garrison, how many units haven't moved yet this round - and are
- *  therefore free to be sent somewhere (a unit may only move once per round). */
-export function availableToMove(state: TerritoryState): UnitComposition {
-  return subtractGarrisons(state.garrison, state.movedIn);
+/** Of a territory's current garrison, how many units are free to be sent somewhere this round.
+ *  Every type but Motorisierte Infanterie may only move once per round: anything in `movedIn`
+ *  (arrived this round, whether by moving, capturing or recruiting) is excluded. Motorisierte
+ *  Infanterie ignores `movedIn` entirely and is available up to twice per round instead - it's
+ *  only unavailable once it's used up its second move too (`extraMoveUsed`), regardless of whether
+ *  it arrived this round or was already sitting there - see splitExtraMoveUnits for how a move
+ *  decides whether it's spending a unit's first or second use. */
+export function availableToMove(state: MovableState): UnitComposition {
+  const base = subtractGarrisons(state.garrison, state.movedIn);
+  return { ...base, motorizedInfantry: state.garrison.motorizedInfantry - state.extraMoveUsed.motorizedInfantry };
+}
+
+/**
+ * Decides how many of a Motorisierte-Infanterie move come from the source's "never moved this
+ * round" pool (still sitting there from before, or freshly recruited/captured-in) versus its
+ * "already moved once, this is its second and last hop" pool - fresh units are spent first. The
+ * split matters only for what the DESTINATION should record: units from the fresh pool arrive
+ * still owing a second move (only added to the destination's `movedIn`, same as any other type);
+ * units from the used-once pool have now used both, so they're also added to the destination's
+ * `extraMoveUsed`, locking them there for the rest of the round.
+ */
+export function splitExtraMoveUnits(fromState: MovableState, motorizedAmount: number): { readonly fresh: number; readonly usedOnce: number } {
+  const freshAvailable = Math.max(0, fromState.garrison.motorizedInfantry - fromState.movedIn.motorizedInfantry);
+  const fresh = Math.min(motorizedAmount, freshAvailable);
+  return { fresh, usedOnce: motorizedAmount - fresh };
 }
 
 export type MoveOutcome =
@@ -85,16 +119,20 @@ export function moveUnits(
   const toState = gameState.territoryState.get(toId);
   if (!toState) return { ok: false, reason: `Unbekanntes Gebiet "${toId}".` };
 
+  const { usedOnce: motorizedUsedOnce } = splitExtraMoveUnits(fromState, amount.motorizedInfantry);
+
   const nextTerritoryState = new Map(gameState.territoryState);
   nextTerritoryState.set(fromId, { ...fromState, garrison: subtractGarrisons(fromState.garrison, amount) });
 
   if (toState.ownerId === null || toState.ownerId === playerId) {
     const baseGarrison = toState.ownerId === playerId ? toState.garrison : EMPTY_GARRISON;
     const baseMovedIn = toState.ownerId === playerId ? toState.movedIn : EMPTY_GARRISON;
+    const baseExtraMoveUsed = toState.ownerId === playerId ? toState.extraMoveUsed : EMPTY_GARRISON;
     nextTerritoryState.set(toId, {
       ownerId: playerId,
       garrison: addGarrisons(baseGarrison, amount),
       movedIn: addGarrisons(baseMovedIn, amount),
+      extraMoveUsed: addGarrisons(baseExtraMoveUsed, { ...EMPTY_GARRISON, motorizedInfantry: motorizedUsedOnce }),
     });
     return { ok: true, gameState: { ...gameState, territoryState: nextTerritoryState } };
   }
@@ -103,7 +141,12 @@ export function moveUnits(
     if (!areAtWar(gameState, playerId, toState.ownerId)) {
       return { ok: false, reason: 'Kein Kriegszustand - erst den Krieg erklären, bevor Gebiete erobert werden können.' };
     }
-    nextTerritoryState.set(toId, { ownerId: playerId, garrison: amount, movedIn: amount });
+    nextTerritoryState.set(toId, {
+      ownerId: playerId,
+      garrison: amount,
+      movedIn: amount,
+      extraMoveUsed: { ...EMPTY_GARRISON, motorizedInfantry: motorizedUsedOnce },
+    });
     const conqueredState = addToPlayerStats(
       { ...gameState, territoryState: nextTerritoryState },
       playerId,

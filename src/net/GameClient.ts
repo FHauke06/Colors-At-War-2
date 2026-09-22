@@ -1,4 +1,4 @@
-import type { AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, UnitComposition } from '../engine/types';
+import type { AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, SupportTech, UnitComposition } from '../engine/types';
 import type { BattleResult } from '../engine/combat';
 import type { BomberRaidMode } from '../engine/airforce';
 import type { ForceEstimate } from '../engine/intel';
@@ -130,14 +130,21 @@ export interface GameClient {
    *  strength-worth of damage per CAS unit, then it starts its 3-round trip back to base. No-op
    *  (with an onError) unless that CAS call-in belongs to this player and has actually arrived. */
   casStrike(calledAircraftId: string, targetSubId: string): void;
-  /** Spends Rüstungspunkte to permanently unlock a ground unit type (Leichte Panzer, Schwere
-   *  Panzer or Artillerie) for recruiting - see engine/research.ts's GROUND_TECH_TREE. No-op
-   *  (with an onError) if already unlocked, its prerequisite isn't, unaffordable, or not this
-   *  player's turn. */
+  /** Spends Rüstungspunkte to permanently unlock a ground unit type (Leichte Panzer or Schwere
+   *  Panzer) for recruiting - see engine/research.ts's GROUND_TECH_TREE. No-op (with an onError)
+   *  if already unlocked, its prerequisite isn't, unaffordable, or not this player's turn. */
   unlockGroundTech(tech: GroundTech): void;
   /** Same as unlockGroundTech, for aircraft types (Jäger, CAS, Bomber) - see
    *  engine/research.ts's AIR_TECH_TREE. */
   unlockAirTech(tech: AirTech): void;
+  /** Same as unlockGroundTech, for engine/research.ts's SUPPORT_TECH_TREE (Artillerie and the
+   *  Atombombe). */
+  unlockSupportTech(tech: SupportTech): void;
+  /** Ends the current tactical battle instantly, destroying every unit on the sub-map - the
+   *  caller's own included - for NUKE_USE_COST Rüstungspunkte (see engine/combat.ts's useNuke).
+   *  No-op (with an onError) unless it's this player's turn within the battle, 'nuke' is unlocked,
+   *  or they can't afford it. */
+  useNuke(): void;
   /** Requests a fuzzy, spy-report-style estimate of `targetId`'s true total Einheiten/Fabriken/
    *  Luftwaffe - see engine/intel.ts's estimateForces for exactly how fuzzy. Answered via
    *  onForceEstimate, not a return value, since a remote session needs a round trip; computed from

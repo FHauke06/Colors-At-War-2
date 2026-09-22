@@ -1,8 +1,9 @@
 import type { BattlePlacement, BattleSubState, BattleSubTerritory, BattleTerrain, CalledAircraft, GameState, PendingBattle, Territory, UnitComposition } from './types';
-import { addGarrisons, subtractGarrisons, totalUnits, availableToMove } from './movement';
-import { pickRandomBattleMap, type BattleMap } from './battleMaps';
+import { addGarrisons, subtractGarrisons, totalUnits, availableToMove, splitExtraMoveUnits } from './movement';
+import { pickRandomBattleMap, type BattleMap } from '../data/BattleMaps';
 import { areAtWar } from './diplomacy';
-import { recordBattleOutcome } from './stats';
+import { recordBattleOutcome, addToPlayerStats } from './stats';
+import { isSupportUnlocked } from './research';
 import {
   airfieldAt,
   emptyAirComposition,
@@ -29,13 +30,13 @@ const TOTAL_ROWS = BOTTOM_ESCAPE_ROW + 1;
  *  the defender winning outright, having simply outlasted the clock. */
 export const MAX_BATTLE_ROUNDS = 60;
 
-const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0 };
+const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 };
 
 /** Same 5:2:1 ratio documented on UnitComposition: infantry=1, lightTank=2.5, heavyTank=5.
  *  Artillery carries no strength here at all (offense or defense) - its only combat role is the
  *  ranged bombardBattleCell action below, not ordinary adjacent movement/combat. Exported for
  *  ui/GameScreen.ts's Research tech-tree tooltips. */
-export const STRENGTH: UnitComposition = { infantry: 1, lightTank: 2.5, heavyTank: 5, artillery: 0 };
+export const STRENGTH: UnitComposition = { infantry: 1, lightTank: 2.5, heavyTank: 5, artillery: 0, motorizedInfantry: 1 };
 
 /** Units fighting from a defended "kleines Gebiet" count 1.5x their nominal strength - ceil'd so
  *  a fight is never decided by a fractional point. */
@@ -45,12 +46,17 @@ const DEFENSE_MULTIPLIER = 1.5;
  *  other adjacency check on this grid) a bombardBattleCell shot can reach. */
 export const ARTILLERY_RANGE = 4;
 
+/** Rüstungspunkte spent each time useNuke is called, on top of the one-time SUPPORT_TECH_TREE
+ *  research cost to unlock 'nuke' in the first place (see engine/research.ts). */
+export const NUKE_USE_COST = 750;
+
 export function battleStrength(composition: UnitComposition): number {
   return (
     composition.infantry * STRENGTH.infantry +
     composition.lightTank * STRENGTH.lightTank +
     composition.heavyTank * STRENGTH.heavyTank +
-    composition.artillery * STRENGTH.artillery
+    composition.artillery * STRENGTH.artillery +
+    composition.motorizedInfantry * STRENGTH.motorizedInfantry
   );
 }
 
@@ -74,6 +80,11 @@ function reduceByStrength(composition: UnitComposition, damage: number): UnitCom
   remaining.infantry -= infantryLost;
   left -= infantryLost * STRENGTH.infantry;
 
+  // Same strength tier as Infanterie (both 1) - taken next, same "cheapest first" convention.
+  const motorizedLost = Math.min(remaining.motorizedInfantry, Math.floor(left / STRENGTH.motorizedInfantry));
+  remaining.motorizedInfantry -= motorizedLost;
+  left -= motorizedLost * STRENGTH.motorizedInfantry;
+
   const lightLost = Math.min(remaining.lightTank, Math.floor(left / STRENGTH.lightTank));
   remaining.lightTank -= lightLost;
   left -= lightLost * STRENGTH.lightTank;
@@ -89,7 +100,7 @@ function subTerritoryId(row: number, col: number): string {
 }
 
 /** Expands a BattleMap's cells into a full terrain lookup. Maps aren't mirrored/symmetric - each
- *  one places its obstacles wherever it wants across the whole grid (see battleMaps.ts). */
+ *  one places its obstacles wherever it wants across the whole grid (see data/BattleMaps). */
 function expandTerrain(map: BattleMap): Map<string, BattleTerrain> {
   const terrain = new Map<string, BattleTerrain>();
   for (const cell of map.cells) terrain.set(subTerritoryId(cell.row, cell.col), cell.terrain);
@@ -166,10 +177,12 @@ function fitsWithin(amount: UnitComposition, available: UnitComposition): boolea
     amount.lightTank >= 0 &&
     amount.heavyTank >= 0 &&
     amount.artillery >= 0 &&
+    amount.motorizedInfantry >= 0 &&
     amount.infantry <= available.infantry &&
     amount.lightTank <= available.lightTank &&
     amount.heavyTank <= available.heavyTank &&
-    amount.artillery <= available.artillery
+    amount.artillery <= available.artillery &&
+    amount.motorizedInfantry <= available.motorizedInfantry
   );
 }
 
@@ -316,7 +329,7 @@ export function simulateAttack(
   nextTerritoryState.set(fromId, { ...fromState, garrison: subtractGarrisons(fromState.garrison, attackerForce) });
   if (attackerWon) {
     const survivors = reduceByStrength(attackerForce, defenderStrength);
-    nextTerritoryState.set(toId, { ownerId: playerId, garrison: survivors, movedIn: survivors });
+    nextTerritoryState.set(toId, { ownerId: playerId, garrison: survivors, movedIn: survivors, extraMoveUsed: EMPTY_GARRISON });
   } else {
     // The defender's toughness bonus applies twice over: it made winning the roll more likely,
     // and it halves the damage they actually take in doing so (SIMULATED_DEFENSE_MULTIPLIER).
@@ -399,6 +412,7 @@ export function beginBattlePhase(
       ownerId: t.side === 'attacker' ? pending.attackerId : pending.defenderId,
       garrison: EMPTY_GARRISON,
       movedIn: EMPTY_GARRISON,
+      extraMoveUsed: EMPTY_GARRISON,
     });
   }
   for (const p of [...attackerPlacements, ...defenderPlacements]) {
@@ -423,6 +437,11 @@ export interface BattleResult {
   readonly attackerId: string;
   readonly defenderId: string;
   readonly attackerWon: boolean;
+  /** Set only when useNuke ended the battle - both sides lost everything, so `attackerWon` is
+   *  always false here but doesn't mean the defender actually held the ground (see useNuke: the
+   *  territory ends up unowned, not defender-owned). ui/GameScreen.ts's showBattleConcluded checks
+   *  this to show a distinct "mutually annihilated" message instead of the usual win/lose one. */
+  readonly nuked?: boolean;
 }
 
 function sideTotalUnits(subState: ReadonlyMap<string, BattleSubState>, ownerId: string): number {
@@ -532,7 +551,7 @@ function applyConclusion(gameState: GameState, result: BattleResult, territories
   const survivors = subTerritoriesOwnedBy(pending.subState!, winnerId);
 
   const nextTerritoryState = new Map(gameState.territoryState);
-  nextTerritoryState.set(pending.territoryId, { ownerId: winnerId, garrison: survivors, movedIn: survivors });
+  nextTerritoryState.set(pending.territoryId, { ownerId: winnerId, garrison: survivors, movedIn: survivors, extraMoveUsed: EMPTY_GARRISON });
 
   const retreatable = retreatableCellIds(pending.subTerritories, pending.subState!, loserId);
   let retreatingUnits = EMPTY_GARRISON;
@@ -543,10 +562,12 @@ function applyConclusion(gameState: GameState, result: BattleResult, territories
       const destState = gameState.territoryState.get(destinationId)!;
       const baseGarrison = destState.ownerId === loserId ? destState.garrison : EMPTY_GARRISON;
       const baseMovedIn = destState.ownerId === loserId ? destState.movedIn : EMPTY_GARRISON;
+      const baseExtraMoveUsed = destState.ownerId === loserId ? destState.extraMoveUsed : EMPTY_GARRISON;
       nextTerritoryState.set(destinationId, {
         ownerId: loserId,
         garrison: addGarrisons(baseGarrison, retreatingUnits),
         movedIn: addGarrisons(baseMovedIn, retreatingUnits),
+        extraMoveUsed: baseExtraMoveUsed,
       });
     }
   }
@@ -885,13 +906,14 @@ export function moveBattleUnits(
   const fromState = pending.subState.get(fromSubId);
   if (!fromState || fromState.ownerId !== playerId) return { ok: false, reason: 'Das Feld gehört dir nicht.' };
   if (totalUnits(amount) === 0) return { ok: false, reason: 'Keine Einheiten ausgewählt.' };
-  const available = subtractGarrisons(fromState.garrison, fromState.movedIn);
-  if (!fitsWithin(amount, available)) {
+  if (!fitsWithin(amount, availableToMove(fromState))) {
     return { ok: false, reason: 'Nicht genug verfügbare Einheiten - manche haben sich diesen Kampfzug schon bewegt.' };
   }
 
   const toState = pending.subState.get(toSubId);
   if (!toState) return { ok: false, reason: `Unbekanntes Feld "${toSubId}".` };
+
+  const { usedOnce: motorizedUsedOnce } = splitExtraMoveUnits(fromState, amount.motorizedInfantry);
 
   const nextSubState = new Map(pending.subState);
   nextSubState.set(fromSubId, { ...fromState, garrison: subtractGarrisons(fromState.garrison, amount) });
@@ -901,13 +923,14 @@ export function moveBattleUnits(
       ownerId: playerId,
       garrison: addGarrisons(toState.garrison, amount),
       movedIn: addGarrisons(toState.movedIn, amount),
+      extraMoveUsed: addGarrisons(toState.extraMoveUsed, { ...EMPTY_GARRISON, motorizedInfantry: motorizedUsedOnce }),
     });
   } else {
     const attackStrength = battleStrength(amount);
     const effectiveDefenseStrength = defenseStrength(toState.garrison);
     if (attackStrength > effectiveDefenseStrength) {
       const survivors = reduceByStrength(amount, effectiveDefenseStrength);
-      nextSubState.set(toSubId, { ownerId: playerId, garrison: survivors, movedIn: survivors });
+      nextSubState.set(toSubId, { ownerId: playerId, garrison: survivors, movedIn: survivors, extraMoveUsed: EMPTY_GARRISON });
     } else {
       // Defender holds (a tie also lands here: reduceByStrength by an equal amount empties it,
       // but the ground stays theirs since the attacker's force didn't survive to take it).
@@ -1007,6 +1030,59 @@ export function bombardBattleCell(
   return { ok: true, gameState: nextGameState, concluded, infantryKilled };
 }
 
+export type UseNukeOutcome =
+  | { readonly ok: true; readonly gameState: GameState; readonly concluded: BattleResult }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Ends the current tactical battle instantly by wiping every unit on the sub-map - the caller's
+ * own included, not just the enemy's ("zerstört alle Einheiten in der Schlacht, auch
+ * freundliche"). Costs NUKE_USE_COST Rüstungspunkte on top of having researched 'nuke' at all (see
+ * engine/research.ts's SUPPORT_TECH_TREE). Unlike an ordinary conclusion (applyConclusion), there
+ * is no winner: the contested territory ends up unowned rather than credited to either side, and
+ * no battlesWon/territoriesConquered goes to anyone - just each side's actual losses (whatever was
+ * still alive on the grid the instant the bomb went off, not merely what was originally
+ * deployed - some of it may already have died in earlier battle-turns). Any called-in aircraft
+ * still return home same as any other conclusion (see returnAllCalledAircraftToBase) - they were
+ * never on the ground to be caught in it.
+ */
+export function useNuke(gameState: GameState, playerId: string): UseNukeOutcome {
+  const pending = gameState.pendingBattle;
+  if (!pending?.subState || !pending.activeSide) return { ok: false, reason: 'Kein taktischer Kampf im Gange.' };
+
+  const activeBattlePlayerId = pending.activeSide === 'attacker' ? pending.attackerId : pending.defenderId;
+  if (activeBattlePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug in diesem Kampf.' };
+  if (!isSupportUnlocked(gameState, playerId, 'nuke')) return { ok: false, reason: 'Atombombe noch nicht erforscht.' };
+
+  const balance = gameState.resources.get(playerId) ?? 0;
+  if (balance < NUKE_USE_COST) return { ok: false, reason: 'Nicht genug Rüstungspunkte für eine Atombombe.' };
+
+  const attackerLosses = sideTotalUnits(pending.subState, pending.attackerId);
+  const defenderLosses = sideTotalUnits(pending.subState, pending.defenderId);
+
+  const resources = new Map(gameState.resources);
+  resources.set(playerId, balance - NUKE_USE_COST);
+
+  let state = addToPlayerStats({ ...gameState, resources }, pending.attackerId, { unitsLost: attackerLosses });
+  state = addToPlayerStats(state, pending.defenderId, { unitsLost: defenderLosses });
+
+  const nextTerritoryState = new Map(state.territoryState);
+  nextTerritoryState.set(pending.territoryId, { ownerId: null, garrison: EMPTY_GARRISON, movedIn: EMPTY_GARRISON, extraMoveUsed: EMPTY_GARRISON });
+
+  const withAircraftReturned = returnAllCalledAircraftToBase({ ...state, territoryState: nextTerritoryState }, pending);
+  const finalGameState: GameState = { ...withAircraftReturned, pendingBattle: null };
+
+  const concluded: BattleResult = {
+    territoryId: pending.territoryId,
+    attackerId: pending.attackerId,
+    defenderId: pending.defenderId,
+    attackerWon: false,
+    nuked: true,
+  };
+
+  return { ok: true, gameState: finalGameState, concluded };
+}
+
 export type EscapeBattleOutcome =
   | { readonly ok: true; readonly gameState: GameState; readonly concluded: BattleResult | null }
   | { readonly ok: false; readonly reason: string };
@@ -1045,8 +1121,7 @@ export function escapeBattle(
   const fromState = pending.subState.get(fromSubId);
   if (!fromState || fromState.ownerId !== playerId) return { ok: false, reason: 'Das Feld gehört dir nicht.' };
   if (totalUnits(amount) === 0) return { ok: false, reason: 'Keine Einheiten ausgewählt.' };
-  const available = subtractGarrisons(fromState.garrison, fromState.movedIn);
-  if (!fitsWithin(amount, available)) {
+  if (!fitsWithin(amount, availableToMove(fromState))) {
     return { ok: false, reason: 'Nicht genug verfügbare Einheiten - manche haben sich diesen Kampfzug schon bewegt.' };
   }
 
@@ -1066,10 +1141,12 @@ export function escapeBattle(
   const nextTerritoryState = new Map(gameState.territoryState);
   const baseGarrison = destState.ownerId === playerId ? destState.garrison : EMPTY_GARRISON;
   const baseMovedIn = destState.ownerId === playerId ? destState.movedIn : EMPTY_GARRISON;
+  const baseExtraMoveUsed = destState.ownerId === playerId ? destState.extraMoveUsed : EMPTY_GARRISON;
   nextTerritoryState.set(destinationId, {
     ownerId: playerId,
     garrison: addGarrisons(baseGarrison, amount),
     movedIn: addGarrisons(baseMovedIn, amount),
+    extraMoveUsed: baseExtraMoveUsed,
   });
 
   let nextGameState: GameState = {
@@ -1106,7 +1183,7 @@ export function endBattleTurn(gameState: GameState, playerId: string, territorie
   let nextSubState = pending.subState;
   let nextRound = pending.battleRound;
   if (nextSide === 'defender') {
-    nextSubState = new Map([...pending.subState].map(([id, s]) => [id, { ...s, movedIn: EMPTY_GARRISON }]));
+    nextSubState = new Map([...pending.subState].map(([id, s]) => [id, { ...s, movedIn: EMPTY_GARRISON, extraMoveUsed: EMPTY_GARRISON }]));
     nextRound += 1;
   }
 

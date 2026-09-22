@@ -1,13 +1,13 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import territoryData from '../src/data/territories.json';
-import type { GameState, LobbyState, Territory, TerritoryData } from '../src/engine/types';
+import { mainMapById } from '../src/data/MainMaps';
+import type { GameState, LobbyState, Territory } from '../src/engine/types';
 import { addAi, addSlot, claimCapital, canStart, createLobby, generateSessionCode, removeAi, serializeGameState } from '../src/engine/session';
 import { buildGameStateFromLobby } from '../src/engine/setup';
 import { moveUnits } from '../src/engine/movement';
 import { endTurn, resumeAiTurnIfNeeded } from '../src/engine/turns';
 import { recruitUnits, buildFactory, upgradeInfrastructure } from '../src/engine/economy';
 import { declareWar, proposePact, withdrawPactProposal, cancelPact } from '../src/engine/diplomacy';
-import { unlockGroundTech, unlockAirTech } from '../src/engine/research';
+import { unlockGroundTech, unlockAirTech, unlockSupportTech } from '../src/engine/research';
 import { filterGameStateForViewer } from '../src/engine/visibility';
 import {
   startBattle,
@@ -22,6 +22,7 @@ import {
   callAirSupport,
   casStrike,
   endBattleTurn as endBattleTurnEngine,
+  useNuke,
 } from '../src/engine/combat';
 import type { BattleResult } from '../src/engine/combat';
 import { autoDeployForBattle, cascadeAiBattleTurns } from '../src/engine/ai';
@@ -30,8 +31,6 @@ import { buildAirfield, upgradeAirfield, recruitAircraft, launchBomberRaid, figh
 import { estimateForces } from '../src/engine/intel';
 import type { BattlePlacement } from '../src/engine/types';
 import type { ClientMessage, ServerMessage } from '../src/net/protocol';
-
-const territories: readonly Territory[] = (territoryData as TerritoryData).territories;
 
 const PORT = Number(process.env.PORT) || 8787;
 
@@ -42,6 +41,10 @@ interface Session {
   /** Deployment for the current pendingBattle, held here instead of on gameState so it's never
    *  broadcast - a player must not see the other side's tactical choice before committing theirs. */
   pendingDeployment: { attacker?: readonly BattlePlacement[]; defender?: readonly BattlePlacement[] };
+  /** Resolved once, from the host's chosen lobby.mapId, at session creation - every handler below
+   *  uses this instead of a single global map, since different sessions can now play different
+   *  maps concurrently. */
+  territories: readonly Territory[];
 }
 
 const sessions = new Map<string, Session>();
@@ -69,7 +72,7 @@ function broadcastLobby(session: Session): void {
 function broadcastGameState(session: Session): void {
   if (!session.gameState) return;
   for (const [viewerId, socket] of session.sockets) {
-    const filtered = filterGameStateForViewer(session.gameState, viewerId, territories);
+    const filtered = filterGameStateForViewer(session.gameState, viewerId, session.territories);
     send(socket, { type: 'game_state', gameState: serializeGameState(filtered) });
   }
 }
@@ -95,7 +98,7 @@ function stashPendingAiDeployment(session: Session, pendingAiDeployment: Pending
  *  the game just sitting there forever once that battle resolves. A no-op the rest of the time. */
 function continueStalledAiTurn(session: Session): void {
   if (!session.gameState) return;
-  const result = resumeAiTurnIfNeeded(session.gameState, territories);
+  const result = resumeAiTurnIfNeeded(session.gameState, session.territories);
   session.gameState = result.gameState;
   stashPendingAiDeployment(session, result.pendingAiDeployment);
 }
@@ -130,9 +133,16 @@ wss.on('connection', (ws) => {
             broadcastLobby(session);
           } else {
             if (!msg.maxHumans) throw new Error('maxHumans fehlt.');
+            if (!msg.mapId) throw new Error('mapId fehlt.');
             const code = freshCode();
-            const lobby = createLobby(code, msg.maxHumans, playerId, msg.name, msg.aiDifficulty);
-            const session: Session = { lobby, gameState: null, sockets: new Map([[playerId, ws]]), pendingDeployment: {} };
+            const lobby = createLobby(code, msg.maxHumans, playerId, msg.name, msg.mapId, msg.aiDifficulty);
+            const session: Session = {
+              lobby,
+              gameState: null,
+              sockets: new Map([[playerId, ws]]),
+              pendingDeployment: {},
+              territories: mainMapById(msg.mapId).territories,
+            };
             sessions.set(code, session);
             sessionCode = code;
             broadcastLobby(session);
@@ -143,7 +153,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session) throw new Error('Session nicht mehr aktiv.');
-          session.lobby = claimCapital(session.lobby, playerId, msg.territoryId, territories);
+          session.lobby = claimCapital(session.lobby, playerId, msg.territoryId, session.territories);
           broadcastLobby(session);
           break;
         }
@@ -152,7 +162,7 @@ wss.on('connection', (ws) => {
           const session = sessions.get(sessionCode);
           if (!session) throw new Error('Session nicht mehr aktiv.');
           if (session.lobby.slots[0]?.playerId !== playerId) throw new Error('Nur der Host kann KIs hinzufügen.');
-          session.lobby = addAi(session.lobby, territories);
+          session.lobby = addAi(session.lobby, session.territories);
           broadcastLobby(session);
           break;
         }
@@ -172,7 +182,7 @@ wss.on('connection', (ws) => {
           if (session.lobby.slots[0]?.playerId !== playerId) throw new Error('Nur der Host kann starten.');
           if (!canStart(session.lobby)) throw new Error('Noch nicht jeder hat eine Hauptstadt gewählt.');
 
-          session.gameState = buildGameStateFromLobby(session.lobby, territories);
+          session.gameState = buildGameStateFromLobby(session.lobby, session.territories);
           session.lobby = { ...session.lobby, status: 'started' };
           broadcastGameState(session);
           break;
@@ -181,7 +191,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = moveUnits(session.gameState, playerId, msg.fromId, msg.toId, territories, msg.amount);
+          const outcome = moveUnits(session.gameState, playerId, msg.fromId, msg.toId, session.territories, msg.amount);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           broadcastGameState(session);
@@ -191,7 +201,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = endTurn(session.gameState, playerId, territories);
+          const outcome = endTurn(session.gameState, playerId, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           stashPendingAiDeployment(session, outcome.pendingAiDeployment);
@@ -262,7 +272,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = launchBomberRaid(session.gameState, playerId, msg.fromTerritoryId, msg.targetTerritoryId, msg.bomberCount, msg.mode, territories);
+          const outcome = launchBomberRaid(session.gameState, playerId, msg.fromTerritoryId, msg.targetTerritoryId, msg.bomberCount, msg.mode, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           broadcastGameState(session);
@@ -272,7 +282,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = fighterSweep(session.gameState, playerId, msg.fromTerritoryId, msg.targetTerritoryId, msg.fighterCount, territories);
+          const outcome = fighterSweep(session.gameState, playerId, msg.fromTerritoryId, msg.targetTerritoryId, msg.fighterCount, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           broadcastGameState(session);
@@ -282,7 +292,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = startBattle(session.gameState, playerId, msg.fromId, msg.toId, territories);
+          const outcome = startBattle(session.gameState, playerId, msg.fromId, msg.toId, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           session.pendingDeployment = {};
@@ -300,7 +310,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = simulateAttack(session.gameState, playerId, msg.fromId, msg.toId, territories);
+          const outcome = simulateAttack(session.gameState, playerId, msg.fromId, msg.toId, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           broadcastBattle(session, outcome.result);
@@ -350,7 +360,7 @@ wss.on('connection', (ws) => {
             // possible since it can initiate a tactical attack itself, see engine/ai.ts's
             // launchAiAttack), it needs to actually take that opening move here, or the battle
             // would just sit waiting on a turn nobody ever plays.
-            session.gameState = cascadeAiBattleTurns(session.gameState, territories);
+            session.gameState = cascadeAiBattleTurns(session.gameState, session.territories);
           }
           continueStalledAiTurn(session);
           broadcastGameState(session);
@@ -360,7 +370,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = moveBattleUnits(session.gameState, playerId, msg.fromSubId, msg.toSubId, msg.amount, territories);
+          const outcome = moveBattleUnits(session.gameState, playerId, msg.fromSubId, msg.toSubId, msg.amount, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           if (outcome.concluded) broadcastBattle(session, outcome.concluded);
@@ -372,7 +382,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = escapeBattle(session.gameState, playerId, msg.fromSubId, msg.destinationId, msg.amount, territories);
+          const outcome = escapeBattle(session.gameState, playerId, msg.fromSubId, msg.destinationId, msg.amount, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           if (outcome.concluded) broadcastBattle(session, outcome.concluded);
@@ -384,10 +394,22 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = bombardBattleCell(session.gameState, playerId, msg.fromSubId, msg.targetSubId, msg.artilleryCount, territories);
+          const outcome = bombardBattleCell(session.gameState, playerId, msg.fromSubId, msg.targetSubId, msg.artilleryCount, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           if (outcome.concluded) broadcastBattle(session, outcome.concluded);
+          continueStalledAiTurn(session);
+          broadcastGameState(session);
+          break;
+        }
+        case 'use_nuke': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = useNuke(session.gameState, playerId);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          session.gameState = outcome.gameState;
+          broadcastBattle(session, outcome.concluded);
           continueStalledAiTurn(session);
           broadcastGameState(session);
           break;
@@ -396,7 +418,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = callAirSupport(session.gameState, playerId, msg.aircraftType, msg.fromTerritoryId, msg.count, territories);
+          const outcome = callAirSupport(session.gameState, playerId, msg.aircraftType, msg.fromTerritoryId, msg.count, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           broadcastGameState(session);
@@ -406,7 +428,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = casStrike(session.gameState, playerId, msg.calledAircraftId, msg.targetSubId, territories);
+          const outcome = casStrike(session.gameState, playerId, msg.calledAircraftId, msg.targetSubId, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           if (outcome.concluded) broadcastBattle(session, outcome.concluded);
@@ -418,12 +440,12 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = endBattleTurnEngine(session.gameState, playerId, territories);
+          const outcome = endBattleTurnEngine(session.gameState, playerId, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           // A full round has a hard cap (see engine/combat.ts's MAX_BATTLE_ROUNDS) past which the
           // defender wins outright - reported the same way a move/escape concluding it already is.
           if (outcome.concluded) broadcastBattle(session, outcome.concluded);
-          session.gameState = cascadeAiBattleTurns(outcome.gameState, territories);
+          session.gameState = cascadeAiBattleTurns(outcome.gameState, session.territories);
           continueStalledAiTurn(session);
           broadcastGameState(session);
           break;
@@ -483,6 +505,16 @@ wss.on('connection', (ws) => {
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
           const outcome = unlockAirTech(session.gameState, playerId, msg.tech);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          session.gameState = outcome.gameState;
+          broadcastGameState(session);
+          break;
+        }
+        case 'unlock_support_tech': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = unlockSupportTech(session.gameState, playerId, msg.tech);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           broadcastGameState(session);

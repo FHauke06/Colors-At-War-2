@@ -19,16 +19,28 @@ export interface TerritoryData {
  * 1 schwerer Panzer, i.e. infantry=1, lightTank=2.5, heavyTank=5 strength points each. Artillery
  * carries no ordinary battle strength at all (offense or defense) - see engine/combat.ts's
  * STRENGTH/reduceByStrength - its entire combat role is the ranged bombardBattleCell action.
+ * Motorisierte Infanterie carries the same strength as plain Infanterie (STRENGTH.infantry) - its
+ * distinguishing trait isn't combat power but mobility: it may move a second time in the same
+ * round/battle-turn, on both the main map and the tactical grid (see engine/movement.ts's
+ * availableToMove and engine/combat.ts's moveBattleUnits, both driven by TerritoryState/
+ * BattleSubState's extraMoveUsed).
  */
 export interface UnitComposition {
   readonly infantry: number;
   readonly lightTank: number;
   readonly heavyTank: number;
   readonly artillery: number;
+  readonly motorizedInfantry: number;
 }
 
-export type GroundTech = 'lightTank' | 'heavyTank' | 'artillery';
+export type GroundTech = 'lightTank' | 'heavyTank' | 'motorizedInfantry';
 export type AirTech = 'fighters' | 'cas' | 'bombers';
+/** Support weapons - neither a frontline ground unit nor an aircraft. Artillerie is recruited onto
+ *  the map like any other unit (its own combat role is the ranged bombardBattleCell action); the
+ *  Atombombe instead is usable mid-battle for a one-off effect (see engine/combat.ts's useNuke)
+ *  rather than recruited at all. Grouped together in the Research tab's "Support" tab (see
+ *  engine/research.ts's SUPPORT_TECH_TREE) since neither fits the ground/air split. */
+export type SupportTech = 'artillery' | 'nuke';
 
 /** How aggressively and effectively every AI seat in a game plays - chosen once, for the whole
  *  lobby, before the game starts (see LobbyState.aiDifficulty/engine/session.ts's createLobby) and
@@ -45,6 +57,7 @@ export type AiDifficulty = 'easy' | 'medium' | 'hard';
 export interface ResearchState {
   readonly unlockedGround: readonly GroundTech[];
   readonly unlockedAir: readonly AirTech[];
+  readonly unlockedSupport: readonly SupportTech[];
 }
 
 export interface Player {
@@ -92,12 +105,20 @@ export interface AirfieldState {
 export interface TerritoryState {
   readonly ownerId: string | null;
   readonly garrison: UnitComposition;
-  /** Of `garrison`, how many arrived (by moving or capturing) this round - a unit may only
-   *  move once per round, so these can't be sent onward again until the round resets. */
+  /** Of `garrison`, how many arrived (by moving, capturing or recruiting) this round - a unit may
+   *  only move once per round, so these can't be sent onward again until the round resets. Doesn't
+   *  gate Motorisierte Infanterie at all (see extraMoveUsed below) - only every other type. */
   readonly movedIn: UnitComposition;
+  /** Motorisierte Infanterie only (always 0 for every other type): of `garrison`, how many have
+   *  used up their second move this round and are now just as stuck as everyone else until the
+   *  round resets. A motorized unit is available to move whenever garrison - extraMoveUsed > 0,
+   *  regardless of movedIn - see engine/movement.ts's availableToMove/splitExtraMoveUnits, which
+   *  decide whether a given move is a unit's first (free of movedIn same as usual, but leaves it
+   *  still available) or second (adds it to the destination's extraMoveUsed, finally locking it). */
+  readonly extraMoveUsed: UnitComposition;
 }
 
-/** 'river' and 'mountain' are impassable - see engine/battleMaps.ts. */
+/** 'river' and 'mountain' are impassable - see data/BattleMaps. */
 export type BattleTerrain = 'normal' | 'river' | 'mountain';
 
 /** A "kleines Gebiet" (one grid cell) on the tactical battle map. Static structure (where it
@@ -127,6 +148,9 @@ export interface BattleSubState {
   readonly ownerId: string;
   readonly garrison: UnitComposition;
   readonly movedIn: UnitComposition;
+  /** Same Motorisierte-Infanterie-only bookkeeping as TerritoryState.extraMoveUsed, just scoped to
+   *  a "kleines Gebiet" on the tactical grid and reset every battle-turn instead of every round. */
+  readonly extraMoveUsed: UnitComposition;
 }
 
 /** One deployment placement: `amount` units placed on a single "kleines Gebiet". Deployment as a
@@ -183,7 +207,7 @@ export interface PendingBattle {
   readonly defenderMax: UnitComposition;
   readonly attackerDeployed: boolean;
   readonly defenderDeployed: boolean;
-  /** Which of engine/battleMaps.ts's BATTLE_MAPS was rolled for this fight - purely informational
+  /** Which of data/BattleMaps' BATTLE_MAPS was rolled for this fight - purely informational
    *  (the terrain itself already lives on each subTerritory), shown in the tactical view header. */
   readonly battleMapName: string;
   readonly subTerritories: readonly BattleSubTerritory[];
@@ -313,6 +337,10 @@ export interface AiSlot {
 
 export interface LobbyState {
   readonly code: string;
+  /** Which of data/MainMaps' MAIN_MAPS this lobby plays on (see MainMapEntry.id) - set once, by
+   *  whoever creates the lobby, same as aiDifficulty below. A joining online client resolves it
+   *  locally against its own MAIN_MAPS rather than receiving the map data itself over the wire. */
+  readonly mapId: string;
   /** Caps how many human slots may join; unrelated to how many AI get added. */
   readonly maxHumans: number;
   readonly slots: readonly LobbySlot[];

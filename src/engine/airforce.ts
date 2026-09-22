@@ -296,7 +296,7 @@ export function resolveAirCombatForRound(gameState: GameState, territories: read
  *  engine/combat.ts's reduceByStrength, duplicated here to avoid a combat.ts <-> airforce.ts
  *  import cycle - both files independently implement the exact same STRENGTH scale). */
 function reduceGarrisonByStrength(garrison: UnitComposition, damage: number): UnitComposition {
-  const STRENGTH = { infantry: 1, lightTank: 2.5, heavyTank: 5, artillery: 0 };
+  const STRENGTH = { infantry: 1, lightTank: 2.5, heavyTank: 5, artillery: 0, motorizedInfantry: 1 };
   let left = damage;
   const remaining = { ...garrison };
   if (left > 0) remaining.artillery = 0;
@@ -304,6 +304,11 @@ function reduceGarrisonByStrength(garrison: UnitComposition, damage: number): Un
   const infantryLost = Math.min(remaining.infantry, Math.floor(left / STRENGTH.infantry));
   remaining.infantry -= infantryLost;
   left -= infantryLost * STRENGTH.infantry;
+
+  // Same strength tier as Infanterie (both 1) - taken next, same "cheapest first" convention.
+  const motorizedLost = Math.min(remaining.motorizedInfantry, Math.floor(left / STRENGTH.motorizedInfantry));
+  remaining.motorizedInfantry -= motorizedLost;
+  left -= motorizedLost * STRENGTH.motorizedInfantry;
 
   const lightLost = Math.min(remaining.lightTank, Math.floor(left / STRENGTH.lightTank));
   remaining.lightTank -= lightLost;

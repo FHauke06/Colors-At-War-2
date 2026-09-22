@@ -8,11 +8,11 @@ export type EndTurnOutcome =
   | { readonly ok: true; readonly gameState: GameState; readonly pendingAiDeployment: PendingAiDeployment | null }
   | { readonly ok: false; readonly reason: string };
 
-const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0 };
+const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 };
 
 function resetMovement(territoryState: GameState['territoryState']): GameState['territoryState'] {
   const next = new Map<string, TerritoryState>();
-  for (const [id, state] of territoryState) next.set(id, { ...state, movedIn: EMPTY_GARRISON });
+  for (const [id, state] of territoryState) next.set(id, { ...state, movedIn: EMPTY_GARRISON, extraMoveUsed: EMPTY_GARRISON });
   return next;
 }
 

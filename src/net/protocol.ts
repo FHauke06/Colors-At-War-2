@@ -1,4 +1,4 @@
-import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameStateWire, GroundTech, LobbyState, UnitComposition } from '../engine/types';
+import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameStateWire, GroundTech, LobbyState, SupportTech, UnitComposition } from '../engine/types';
 import type { BattleResult } from '../engine/combat';
 import type { BomberRaidMode } from '../engine/airforce';
 import type { ForceEstimate } from '../engine/intel';
@@ -13,6 +13,8 @@ export type ClientMessage =
       readonly name: string;
       /** Only used (and required) when creating a new session. */
       readonly maxHumans?: number;
+      /** Which MAIN_MAPS entry to play on; only used (and required) when creating a new session. */
+      readonly mapId?: string;
       /** Only used when creating a new session - defaults to 'medium' if omitted. */
       readonly aiDifficulty?: AiDifficulty;
     }
@@ -72,6 +74,8 @@ export type ClientMessage =
   | { readonly type: 'cas_strike'; readonly calledAircraftId: string; readonly targetSubId: string }
   | { readonly type: 'unlock_ground_tech'; readonly tech: GroundTech }
   | { readonly type: 'unlock_air_tech'; readonly tech: AirTech }
+  | { readonly type: 'unlock_support_tech'; readonly tech: SupportTech }
+  | { readonly type: 'use_nuke' }
   | { readonly type: 'estimate_forces'; readonly targetId: string };
 
 export type ServerMessage =

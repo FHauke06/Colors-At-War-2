@@ -1,6 +1,6 @@
 import type { GameState, Territory, TerritoryDevelopment, TerritoryState, UnitComposition } from './types';
 
-const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0 };
+const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 };
 
 /** A territory's garrison is visible to `viewerId` if they own it, or own any neighboring
  *  territory - matching how far a real front line's reconnaissance would reach. Ownership itself
@@ -38,7 +38,7 @@ export function filterGameStateForViewer(
     if (garrisonVisible(gameState, viewerId, id, neighborsById)) {
       territoryState.set(id, state);
     } else {
-      territoryState.set(id, { ...state, garrison: EMPTY_GARRISON, movedIn: EMPTY_GARRISON });
+      territoryState.set(id, { ...state, garrison: EMPTY_GARRISON, movedIn: EMPTY_GARRISON, extraMoveUsed: EMPTY_GARRISON });
     }
   }
 

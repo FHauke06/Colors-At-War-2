@@ -1,10 +1,12 @@
-import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, Territory, UnitComposition } from '../engine/types';
+import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, SupportTech, Territory, UnitComposition } from '../engine/types';
 import { addAi, claimCapital, canStart, createLobby, removeAi } from '../engine/session';
-import { buildGameStateFromLobby } from '../engine/setup';
+import { mainMapById } from '../data/MainMaps';
+import { buildGameStateFromLobby, buildGameStateFromScenario, lobbyFromScenario } from '../engine/setup';
+import type { Scenario } from '../data/Scenarios/types';
 import { moveUnits } from '../engine/movement';
 import { endTurn, resumeAiTurnIfNeeded } from '../engine/turns';
 import { recruitUnits, buildFactory as buildFactoryEngine, upgradeInfrastructure as upgradeInfrastructureEngine } from '../engine/economy';
-import { unlockGroundTech as unlockGroundTechEngine, unlockAirTech as unlockAirTechEngine } from '../engine/research';
+import { unlockGroundTech as unlockGroundTechEngine, unlockAirTech as unlockAirTechEngine, unlockSupportTech as unlockSupportTechEngine } from '../engine/research';
 import {
   startBattle,
   simulateAttack as simulateAttackEngine,
@@ -18,6 +20,7 @@ import {
   callAirSupport as callAirSupportEngine,
   casStrike as casStrikeEngine,
   endBattleTurn as endBattleTurnEngine,
+  useNuke as useNukeEngine,
 } from '../engine/combat';
 import type { BattleResult } from '../engine/combat';
 import { autoDeployForBattle, cascadeAiBattleTurns } from '../engine/ai';
@@ -47,6 +50,9 @@ export class LocalGameClient implements GameClient {
   private lobby: LobbyState;
   private gameState: GameState | null = null;
   private readonly territories: readonly Territory[];
+  /** Set only for a scenario game (see fromScenario) - start() branches on this to build the
+   *  scenario's full pre-populated GameState instead of the normal "one empty capital each". */
+  private readonly scenario: Scenario | null;
   private readonly lobbyListeners = new Set<(lobby: LobbyState) => void>();
   private readonly startListeners = new Set<(gameState: GameState) => void>();
   private readonly stateListeners = new Set<(gameState: GameState) => void>();
@@ -59,11 +65,29 @@ export class LocalGameClient implements GameClient {
   private attackerDeployment: readonly BattlePlacement[] | null = null;
   private defenderDeployment: readonly BattlePlacement[] | null = null;
 
-  constructor(territories: readonly Territory[], hostName: string, aiCount: number, aiDifficulty: AiDifficulty = 'medium') {
+  private constructor(territories: readonly Territory[], lobby: LobbyState, scenario: Scenario | null = null) {
     this.territories = territories;
-    let lobby = createLobby('LOKAL', 1, LOCAL_PLAYER_ID, hostName, aiDifficulty);
-    for (let i = 0; i < aiCount; i++) lobby = addAi(lobby, territories);
     this.lobby = lobby;
+    this.scenario = scenario;
+  }
+
+  /** Normal offline game: an empty map where every seat (the human, then each added AI) still
+   *  needs a capital before start() will do anything. */
+  static newLobby(mapId: string, hostName: string, aiCount: number, aiDifficulty: AiDifficulty = 'medium'): LocalGameClient {
+    const territories = mainMapById(mapId).territories;
+    let lobby = createLobby('LOKAL', 1, LOCAL_PLAYER_ID, hostName, mapId, aiDifficulty);
+    for (let i = 0; i < aiCount; i++) lobby = addAi(lobby, territories);
+    return new LocalGameClient(territories, lobby);
+  }
+
+  /** Scenario game (see data/Scenarios): every faction's territories/garrisons/resources are
+   *  already fixed by the scenario - the human just picks which faction to play and the AI
+   *  difficulty for the rest. start() skips straight to buildGameStateFromScenario; there's no
+   *  capital-claiming lobby step. */
+  static fromScenario(scenario: Scenario, humanFactionIndex: number, humanName: string, aiDifficulty: AiDifficulty): LocalGameClient {
+    const territories = mainMapById(scenario.mapId).territories;
+    const lobby = lobbyFromScenario(scenario, humanFactionIndex, LOCAL_PLAYER_ID, humanName, aiDifficulty);
+    return new LocalGameClient(territories, lobby, scenario);
   }
 
   getLobby(): LobbyState {
@@ -117,7 +141,9 @@ export class LocalGameClient implements GameClient {
       this.errorListeners.forEach((cb) => cb('Noch nicht jeder Spieler hat eine Hauptstadt gewählt.'));
       return;
     }
-    this.gameState = buildGameStateFromLobby(this.lobby, this.territories);
+    this.gameState = this.scenario
+      ? buildGameStateFromScenario(this.scenario, this.lobby, this.territories)
+      : buildGameStateFromLobby(this.lobby, this.territories);
     this.lobby = { ...this.lobby, status: 'started' };
     const filtered = this.visibleState();
     this.startListeners.forEach((cb) => cb(filtered));
@@ -501,6 +527,30 @@ export class LocalGameClient implements GameClient {
       return;
     }
     this.gameState = outcome.gameState;
+    this.notifyState();
+  }
+
+  unlockSupportTech(tech: SupportTech): void {
+    if (!this.gameState) return;
+    const outcome = unlockSupportTechEngine(this.gameState, this.playerId, tech);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.gameState = outcome.gameState;
+    this.notifyState();
+  }
+
+  useNuke(): void {
+    if (!this.gameState) return;
+    const outcome = useNukeEngine(this.gameState, this.playerId);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.gameState = outcome.gameState;
+    this.battleListeners.forEach((cb) => cb(outcome.concluded));
+    this.continueStalledAiTurn();
     this.notifyState();
   }
 

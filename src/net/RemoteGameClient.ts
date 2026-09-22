@@ -1,4 +1,4 @@
-import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, UnitComposition } from '../engine/types';
+import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, SupportTech, UnitComposition } from '../engine/types';
 import { deserializeGameState } from '../engine/session';
 import type { BattleResult } from '../engine/combat';
 import type { BomberRaidMode } from '../engine/airforce';
@@ -18,6 +18,9 @@ export interface RemoteSessionOptions {
   readonly name: string;
   /** How many human slots the lobby accepts; only used (and required) when creating. */
   readonly maxHumans?: number;
+  /** Which of data/MainMaps' MAIN_MAPS to play on; only used (and required) when creating - a
+   *  joining client gets it from the lobby the server sends back instead. */
+  readonly mapId?: string;
   /** How well every AI seat added to this lobby plays; only used when creating - defaults to
    *  'medium' if omitted (see LobbyState.aiDifficulty). */
   readonly aiDifficulty?: AiDifficulty;
@@ -41,6 +44,9 @@ export class RemoteGameClient implements GameClient {
   constructor(wsUrl: string, options: RemoteSessionOptions) {
     this.lobby = {
       code: '',
+      // Unknown until the real lobby arrives from the server (see SetupScreen's "connecting"
+      // guard, which holds off building the map view until then).
+      mapId: '',
       maxHumans: options.maxHumans ?? 0,
       slots: [],
       aiSlots: [],
@@ -56,6 +62,7 @@ export class RemoteGameClient implements GameClient {
         code: options.code,
         name: options.name,
         maxHumans: options.maxHumans,
+        mapId: options.mapId,
         aiDifficulty: options.aiDifficulty,
       });
     });
@@ -196,6 +203,10 @@ export class RemoteGameClient implements GameClient {
     this.send({ type: 'bombard_battle_cell', fromSubId, targetSubId, artilleryCount });
   }
 
+  useNuke(): void {
+    this.send({ type: 'use_nuke' });
+  }
+
   callAirSupport(type: 'fighter' | 'cas', fromTerritoryId: string, count: number): void {
     this.send({ type: 'call_air_support', aircraftType: type, fromTerritoryId, count });
   }
@@ -250,6 +261,10 @@ export class RemoteGameClient implements GameClient {
 
   unlockAirTech(tech: AirTech): void {
     this.send({ type: 'unlock_air_tech', tech });
+  }
+
+  unlockSupportTech(tech: SupportTech): void {
+    this.send({ type: 'unlock_support_tech', tech });
   }
 
   estimateEnemyForces(targetId: string): void {

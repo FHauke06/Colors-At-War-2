@@ -1,12 +1,9 @@
 import './style.css';
-import territoryData from './data/territories.json';
 import type { GameState, TerritoryData } from './engine/types';
 import type { GameClient } from './net/GameClient';
 import { SetupScreen } from './ui/SetupScreen';
 import { GameScreen } from './ui/GameScreen';
 import { buildThemeToggle } from './ui/theme';
-
-const data = territoryData as TerritoryData;
 
 const app = document.querySelector<HTMLDivElement>('#app');
 if (!app) throw new Error('#app root element missing');
@@ -23,10 +20,10 @@ app.appendChild(headerRow);
 const screenContainer = document.createElement('div');
 app.appendChild(screenContainer);
 
-function showGame(client: GameClient, gameState: GameState): void {
+function showGame(client: GameClient, gameState: GameState, data: TerritoryData): void {
   setup.destroy();
   screenContainer.replaceChildren();
   new GameScreen(screenContainer, data, client, gameState);
 }
 
-const setup = new SetupScreen(screenContainer, data, showGame);
+const setup = new SetupScreen(screenContainer, showGame);

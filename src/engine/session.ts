@@ -42,6 +42,7 @@ export function createLobby(
   maxHumans: number,
   hostId: string,
   hostName: string,
+  mapId: string,
   aiDifficulty: AiDifficulty = 'medium',
 ): LobbyState {
   if (maxHumans < 1 || maxHumans > MAX_FACTIONS) {
@@ -54,7 +55,7 @@ export function createLobby(
     capitalId: null,
     isHost: true,
   };
-  return { code, maxHumans, slots: [host], aiSlots: [], status: 'lobby', aiDifficulty };
+  return { code, mapId, maxHumans, slots: [host], aiSlots: [], status: 'lobby', aiDifficulty };
 }
 
 export function addSlot(lobby: LobbyState, playerId: string, name: string): LobbyState {

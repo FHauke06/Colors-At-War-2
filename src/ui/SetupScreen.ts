@@ -6,6 +6,9 @@ import type { GameClient } from '../net/GameClient';
 import { isHost } from '../net/GameClient';
 import { LocalGameClient } from '../net/LocalGameClient';
 import { RemoteGameClient, resolveWsUrl } from '../net/RemoteGameClient';
+import { MAIN_MAPS, DEFAULT_MAIN_MAP_ID, mainMapById } from '../data/MainMaps';
+import { SCENARIOS } from '../data/Scenarios';
+import type { Scenario } from '../data/Scenarios';
 
 const inputClass =
   'rounded-md border border-slate-600 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-amber-400 focus:outline-none';
@@ -23,22 +26,31 @@ const DIFFICULTY_LABELS: Record<AiDifficulty, string> = {
 
 export class SetupScreen {
   private readonly root: HTMLElement;
-  private readonly territories: readonly Territory[];
-  private readonly data: TerritoryData;
-  private readonly onComplete: (client: GameClient, gameState: GameState) => void;
+  private readonly onComplete: (client: GameClient, gameState: GameState, data: TerritoryData) => void;
+
+  /** Which of data/MainMaps' MAIN_MAPS is currently selected - chosen via renderMapSelector for an
+   *  offline game or an online host, or adopted from the lobby's mapId for a joining online client
+   *  (see enterLobby's ensureMapCurrent). data/territories are kept in lockstep via setMap. */
+  private selectedMapId: string = DEFAULT_MAIN_MAP_ID;
+  private data: TerritoryData = mainMapById(this.selectedMapId);
+  private territories: readonly Territory[] = this.data.territories;
 
   private client: GameClient | null = null;
   private map: MapRenderer | null = null;
   private unsubscribers: (() => void)[] = [];
 
-  constructor(container: HTMLElement, data: TerritoryData, onComplete: (client: GameClient, gameState: GameState) => void) {
-    this.data = data;
-    this.territories = data.territories;
+  constructor(container: HTMLElement, onComplete: (client: GameClient, gameState: GameState, data: TerritoryData) => void) {
     this.onComplete = onComplete;
     this.root = document.createElement('div');
     this.root.className = 'mx-auto max-w-2xl';
     container.appendChild(this.root);
     this.renderModeSelect();
+  }
+
+  private setMap(mapId: string): void {
+    this.selectedMapId = mapId;
+    this.data = mainMapById(mapId);
+    this.territories = this.data.territories;
   }
 
   /** Unsubscribes from the current client's events. Call when this screen is being torn down
@@ -79,8 +91,121 @@ export class SetupScreen {
     onlineBtn.className = secondaryBtnClass;
     onlineBtn.addEventListener('click', () => this.renderOnlineChoice());
 
-    row.append(offlineBtn, onlineBtn);
+    const scenarioBtn = document.createElement('button');
+    scenarioBtn.type = 'button';
+    scenarioBtn.textContent = 'Szenario spielen';
+    scenarioBtn.className = secondaryBtnClass;
+    scenarioBtn.addEventListener('click', () => this.renderScenarioSelect());
+
+    row.append(offlineBtn, onlineBtn, scenarioBtn);
     card.append(title, row);
+    this.root.appendChild(card);
+  }
+
+  // --- scenario step 1: pick a scenario ---
+  private renderScenarioSelect(): void {
+    this.clear();
+    const card = document.createElement('div');
+    card.className = `${cardClass} flex flex-col gap-4`;
+
+    const title = document.createElement('h2');
+    title.textContent = 'Szenario wählen';
+    title.className = 'text-lg font-semibold';
+
+    const list = document.createElement('div');
+    list.className = 'flex flex-col gap-2';
+    for (const scenario of SCENARIOS) {
+      const mapName = MAIN_MAPS.find((m) => m.id === scenario.mapId)?.name ?? scenario.mapId;
+
+      const entry = document.createElement('button');
+      entry.type = 'button';
+      entry.className = `${cardClass} text-left hover:border-amber-400`;
+      const entryTitle = document.createElement('div');
+      entryTitle.className = 'font-semibold';
+      entryTitle.textContent = `${scenario.name} (${mapName})`;
+      const entryDesc = document.createElement('div');
+      entryDesc.className = 'text-sm text-slate-400';
+      entryDesc.textContent = scenario.description;
+      entry.append(entryTitle, entryDesc);
+      entry.addEventListener('click', () => this.renderScenarioConfig(scenario));
+      list.appendChild(entry);
+    }
+
+    card.append(title, list, this.backRow());
+    this.root.appendChild(card);
+  }
+
+  // --- scenario step 2: pick your faction + AI difficulty, then start immediately ---
+  private renderScenarioConfig(scenario: Scenario): void {
+    this.clear();
+    let humanFactionIndex = 0;
+    let aiDifficulty: AiDifficulty = 'medium';
+
+    const card = document.createElement('div');
+    card.className = `${cardClass} flex flex-col gap-4`;
+
+    const title = document.createElement('h2');
+    title.textContent = scenario.name;
+    title.className = 'text-lg font-semibold';
+
+    const desc = document.createElement('p');
+    desc.className = 'text-sm text-slate-400';
+    desc.textContent = scenario.description;
+
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.placeholder = 'Dein Name';
+    nameInput.maxLength = 24;
+    nameInput.className = inputClass;
+
+    const factionWrap = document.createElement('div');
+    factionWrap.className = 'flex flex-col gap-1.5';
+    const factionLabel = document.createElement('span');
+    factionLabel.textContent = 'Deine Fraktion:';
+    factionLabel.className = 'text-sm text-slate-300';
+    const factionSelect = document.createElement('select');
+    factionSelect.className = inputClass;
+    scenario.factions.forEach((faction, i) => {
+      const option = document.createElement('option');
+      option.value = String(i);
+      option.textContent = faction.name;
+      factionSelect.appendChild(option);
+    });
+    factionSelect.addEventListener('change', () => {
+      humanFactionIndex = Number(factionSelect.value);
+    });
+    factionWrap.append(factionLabel, factionSelect);
+
+    const errorBanner = document.createElement('div');
+    errorBanner.className = 'hidden rounded-md border border-red-700 bg-red-950 px-3 py-2 text-sm text-red-200';
+
+    const startBtn = document.createElement('button');
+    startBtn.type = 'button';
+    startBtn.textContent = 'Spiel starten';
+    startBtn.className = primaryBtnClass;
+    startBtn.addEventListener('click', () => {
+      const name = nameInput.value.trim() || 'Spieler 1';
+      this.setMap(scenario.mapId);
+      const client = LocalGameClient.fromScenario(scenario, humanFactionIndex, name, aiDifficulty);
+      this.client = client;
+      this.unsubscribers.push(client.onError((message) => {
+        errorBanner.textContent = message;
+        errorBanner.classList.remove('hidden');
+      }));
+      this.unsubscribers.push(client.onGameStart((gameState) => this.onComplete(client, gameState, this.data)));
+      client.start();
+    });
+
+    card.append(
+      title,
+      desc,
+      nameInput,
+      factionWrap,
+      this.renderDifficultySelector(() => aiDifficulty, (d) => { aiDifficulty = d; }),
+      errorBanner,
+      this.backRow(() => this.renderScenarioSelect()),
+      startBtn,
+    );
     this.root.appendChild(card);
   }
 
@@ -96,6 +221,7 @@ export class SetupScreen {
       () => factionCount,
       (n) => { factionCount = n; },
     );
+    card.appendChild(this.renderMapSelector());
     card.appendChild(this.renderDifficultySelector(() => aiDifficulty, (d) => { aiDifficulty = d; }));
 
     const startBtn = document.createElement('button');
@@ -104,7 +230,7 @@ export class SetupScreen {
     startBtn.className = primaryBtnClass;
     startBtn.addEventListener('click', () => {
       const name = nameInput.value.trim() || 'Spieler 1';
-      this.client = new LocalGameClient(this.territories, name, factionCount - 1, aiDifficulty);
+      this.client = LocalGameClient.newLobby(this.selectedMapId, name, factionCount - 1, aiDifficulty);
       this.enterLobby();
     });
 
@@ -154,6 +280,7 @@ export class SetupScreen {
       () => maxHumans,
       (n) => { maxHumans = n; },
     );
+    card.appendChild(this.renderMapSelector());
     card.appendChild(this.renderDifficultySelector(() => aiDifficulty, (d) => { aiDifficulty = d; }));
     const hint = document.createElement('p');
     hint.className = 'text-sm text-slate-400';
@@ -166,7 +293,7 @@ export class SetupScreen {
     createBtn.className = primaryBtnClass;
     createBtn.addEventListener('click', () => {
       const name = nameInput.value.trim() || 'Host';
-      this.client = new RemoteGameClient(resolveWsUrl(), { name, maxHumans, aiDifficulty });
+      this.client = new RemoteGameClient(resolveWsUrl(), { name, maxHumans, mapId: this.selectedMapId, aiDifficulty });
       this.enterLobby();
     });
 
@@ -267,6 +394,33 @@ export class SetupScreen {
     return { card, nameInput, countLabel, bumpCount };
   }
 
+  /** "Hauptkarte" dropdown for data/MainMaps' MAIN_MAPS - shown once, alongside the offline
+   *  faction count or the online host's max-player count, same spot as the KI-Schwierigkeit
+   *  selector below. Only the lobby creator picks a map; a joining online client just adopts
+   *  whatever the host chose via lobby.mapId (see enterLobby's ensureMapCurrent). */
+  private renderMapSelector(): HTMLDivElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'flex flex-col gap-1.5';
+
+    const label = document.createElement('span');
+    label.textContent = 'Hauptkarte:';
+    label.className = 'text-sm text-slate-300';
+
+    const select = document.createElement('select');
+    select.className = inputClass;
+    for (const map of MAIN_MAPS) {
+      const option = document.createElement('option');
+      option.value = map.id;
+      option.textContent = map.name;
+      select.appendChild(option);
+    }
+    select.value = this.selectedMapId;
+    select.addEventListener('change', () => this.setMap(select.value));
+
+    wrap.append(label, select);
+    return wrap;
+  }
+
   /** "Einfach"/"Mittel"/"Schwer" toggle row for engine/types.ts's AiDifficulty - "am Spielbeginn
    *  einstellen, wie gut die KI ist". One choice for the whole lobby (see LobbyState.aiDifficulty),
    *  not per AI seat, so this appears once, alongside the offline faction count or the online
@@ -348,8 +502,10 @@ export class SetupScreen {
     hint.textContent = 'Klicke auf der Karte ein Gebiet, um es als deine Hauptstadt festzulegen.';
 
     const mapContainer = document.createElement('div');
-    this.map = new MapRenderer(mapContainer, this.data);
-    this.map.setClickHandler((territoryId) => client.claimCapital(territoryId));
+    // Built lazily by ensureMapCurrent below, once this session's real map is known - immediately
+    // for an offline game or an online host (this.selectedMapId is already right by the time
+    // enterLobby runs), only once the first real lobby message arrives for a joining online client
+    // (whose placeholder lobby.mapId is '' until then - see RemoteGameClient's constructor).
 
     const actionRow = document.createElement('div');
     actionRow.className = 'flex items-center gap-3';
@@ -368,9 +524,17 @@ export class SetupScreen {
       errorBanner.classList.remove('hidden');
     };
 
+    const ensureMapCurrent = (lobby: LobbyState, connecting: boolean): void => {
+      if (this.map || connecting) return;
+      if (lobby.mapId) this.setMap(lobby.mapId);
+      this.map = new MapRenderer(mapContainer, this.data);
+      this.map.setClickHandler((territoryId) => client.claimCapital(territoryId));
+    };
+
     const update = (lobby: LobbyState): void => {
       const host = isHost(client);
       const connecting = client.isOnline && !lobby.code;
+      ensureMapCurrent(lobby, connecting);
 
       status.classList.toggle('hidden', !client.isOnline);
       if (client.isOnline) {
@@ -407,7 +571,7 @@ export class SetupScreen {
 
     this.unsubscribers.push(client.onLobby(update));
     this.unsubscribers.push(client.onError(showError));
-    this.unsubscribers.push(client.onGameStart((gameState) => this.onComplete(client, gameState)));
+    this.unsubscribers.push(client.onGameStart((gameState) => this.onComplete(client, gameState, this.data)));
 
     update(client.getLobby());
   }

@@ -287,7 +287,7 @@ function runAiAttacks(gameState: GameState, aiPlayerId: string, territories: rea
 }
 
 const MAX_ECONOMY_ACTIONS = 25;
-const RECRUIT_COMPOSITION = (count: number): UnitComposition => ({ infantry: count, lightTank: 0, heavyTank: 0, artillery: 0 });
+const RECRUIT_COMPOSITION = (count: number): UnitComposition => ({ infantry: count, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 });
 
 /**
  * Spends the AI's Rüstungspunkte at its capital: factories first (raises income), then
@@ -384,7 +384,7 @@ function runAiDiversifiedSpending(gameState: GameState, aiPlayerId: string, capi
 function runAiGroundDiversification(gameState: GameState, aiPlayerId: string, capitalId: string, budget: number): GameState {
   if (budget <= 0) return gameState;
   let remaining = budget;
-  const amount: Record<keyof UnitComposition, number> = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0 };
+  const amount: Record<keyof UnitComposition, number> = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 };
 
   for (const type of ['artillery', 'lightTank'] as const) {
     const typeBudget = Math.floor(remaining / 2);
@@ -585,6 +585,7 @@ export function autoDeployForBattle(
     lightTank: 0,
     heavyTank: 0,
     artillery: 0,
+    motorizedInfantry: 0,
   }));
   const distribute = (type: keyof UnitComposition, count: number): void => {
     let remaining = count;
