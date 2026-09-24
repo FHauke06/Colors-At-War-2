@@ -84,7 +84,7 @@ export interface GameClient {
   endBattleTurn(): void;
   /** Bietet in der laufenden taktischen Schlacht ein Unentschieden an bzw. stimmt dem des Gegners zu (jederzeit in der
    *  Kampfphase, unabhängig vom Zug). Stimmen beide Seiten zu, endet die Schlacht unverändert (siehe engine/combat.ts's
-   *  proposeBattleDraw); eine beteiligte KI antwortet sofort nach ihrer Heuristik (engine/ai.ts's aiWantsDraw). */
+   *  proposeBattleDraw); eine beteiligte KI antwortet sofort: sie nimmt an, wenn sie den Kampf nicht mehr gewinnen kann oder keine Seite mehr durchkommt (engine/ai.ts's aiHandleDraw). */
   proposeBattleDraw(): void;
   /** Declares war on `targetId` - a prerequisite for attacking or capturing their territory.
    *  Everyone in each side's alliance is at war with everyone in the other's from then on (see

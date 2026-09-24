@@ -10,6 +10,10 @@
     "generate:map": "node scripts/generate-territories.mjs"
   },
   "devDependencies": {
+    "@fontsource/big-shoulders-display": "^5.3.0",
+    "@fontsource/big-shoulders-stencil-display": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
     "@tailwindcss/vite": "^4.3.3",
     "@turf/turf": "^7.4.0",
     "tailwindcss": "^4.3.3",

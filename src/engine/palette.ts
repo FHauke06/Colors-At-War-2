@@ -14,4 +14,4 @@ export const FACTION_COLORS: readonly string[] = [
 export const MAX_FACTIONS = FACTION_COLORS.length;
 export const MIN_FACTIONS = 2;
 
-export const NEUTRAL_COLOR = '#475569'; // slate-600, unowned territory
+export const NEUTRAL_COLOR = '#8d8874'; // warm khaki grey (matches the paper/ink theme), unowned territory

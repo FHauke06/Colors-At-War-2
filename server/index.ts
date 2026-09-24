@@ -125,7 +125,7 @@ function afterSeaStep(session: Session, result: { readonly gameState: GameState;
 
 const wss = new WebSocketServer({ port: PORT });
 // eslint-disable-next-line no-console
-console.log(`Colors at War session server listening on :${PORT}`);
+console.log(`Colors at War 2 session server listening on :${PORT}`);
 
 wss.on('connection', (ws) => {
   let sessionCode: string | null = null;

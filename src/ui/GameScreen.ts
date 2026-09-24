@@ -55,10 +55,14 @@ import { AIRCRAFT_ICON_PATHS, AIRCRAFT_LABELS, AIRCRAFT_TYPES } from '../render/
 import { SHIP_ICON_PATH } from '../render/shipIcons';
 import { TERRAIN_ICON_PATHS } from '../render/terrainIcons';
 import type { GameClient } from '../net/GameClient';
+import { primaryBtnClass, secondaryBtnClass, dangerBtnClass, tabBtnClass } from './styles';
+import { uiIcon } from './uiIcons';
+import { TAB_HELP, TAB_ORDER, isHelpOpen } from './helpDialog';
+import type { TabId } from './helpDialog';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
-type Tab = 'map' | 'resources' | 'diplomacy' | 'airforce' | 'naval' | 'research';
+type Tab = TabId;
 
 /** Outline colors the Diplomatie tab draws around the clicked country's territories and around its
  *  allies' territories (see GameScreen.renderDiplomacyFocus) - both picked to stay visible on top of
@@ -69,9 +73,6 @@ const DIPLOMACY_ALLY_STROKE = '#67e8f9'; // cyan-300
  *  group of territories at once and has to stay readable at a glance, not just mark one. */
 const DIPLOMACY_FOCUS_STROKE_WIDTH = '2';
 const DIPLOMACY_ALLY_STROKE_WIDTH = '1.5';
-const RESEARCH_HINT =
-  'Schalte neue Einheiten- und Flugzeugtypen für Rüstungspunkte frei - Infanterie ist von Anfang an verfügbar. Manche Technologien setzen eine andere voraus. Fahre mit der Maus über eine Technologie, um ihre Werte zu sehen.';
-
 /** Hover-tooltip text for each researchable ground unit - see engine/research.ts's GROUND_TECH_TREE. */
 const GROUND_TECH_STATS: Record<GroundTech, string> = {
   lightTank: `Stärke ${STRENGTH.lightTank} (Infanterie = ${STRENGTH.infantry}) — Rekrutierung: ${UNIT_COSTS.lightTank} Pkt./Einheit`,
@@ -98,11 +99,6 @@ const SUPPORT_TECH_STATS: Record<SupportTech, string> = {
   artillery: `Kein gewöhnlicher Kampfwert — Fernbeschuss bis ${ARTILLERY_RANGE} Felder im Kampf, bis zu 1 Infanterie pro Artillerie — Rekrutierung: ${UNIT_COSTS.artillery} Pkt./Einheit`,
   nuke: `Einsatz im taktischen Kampf: ${NUKE_USE_COST} Pkt./Bombe — zerstört ALLE Einheiten in der Schlacht, auch die eigenen, und beendet den Kampf sofort ohne Sieger`,
 };
-
-const primaryBtnClass =
-  'rounded-md bg-amber-500 px-4 py-1.5 text-sm font-semibold text-slate-900 hover:bg-amber-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500';
-const secondaryBtnClass =
-  'rounded-md border border-slate-600 bg-slate-800 px-4 py-1.5 text-sm font-semibold text-slate-100 hover:bg-slate-700 disabled:cursor-not-allowed disabled:border-slate-700 disabled:bg-slate-900 disabled:text-slate-600 disabled:hover:bg-slate-900';
 
 /** The escape row's tiles always use this color, in both phases and regardless of who's viewing -
  *  distinct from any player color or the dark "unknown zone" background. */
@@ -293,14 +289,13 @@ export class GameScreen {
       'mb-3 hidden rounded-md border border-amber-700 bg-amber-950/40 px-3 py-2 text-sm text-amber-200';
 
     this.turnRow = document.createElement('div');
-    this.turnRow.className =
-      'mb-3 flex items-center justify-between gap-3 rounded-md border border-slate-700 bg-slate-800/60 px-3 py-2';
+    this.turnRow.className = 'frame mb-3 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-md bg-slate-800 px-4 py-2';
     this.turnStatus = document.createElement('div');
-    this.turnStatus.className = 'text-sm text-slate-200';
+    this.turnStatus.className = 'flex flex-wrap items-center gap-x-5 gap-y-1';
     this.endTurnBtn = document.createElement('button');
     this.endTurnBtn.type = 'button';
-    this.endTurnBtn.textContent = 'Zug beenden';
-    this.endTurnBtn.className = primaryBtnClass;
+    this.endTurnBtn.append(uiIcon('endTurn', 14), document.createTextNode('Zug beenden'));
+    this.endTurnBtn.className = dangerBtnClass;
     this.endTurnBtn.addEventListener('click', () => client.endTurn());
     this.turnRow.append(this.turnStatus, this.endTurnBtn);
 
@@ -308,30 +303,28 @@ export class GameScreen {
     // Bleibt beim Scrollen am oberen Bildschirmrand kleben; `-mt-2 pt-2` hält den Abstand im Ruhezustand unverändert,
     // der deckende Hintergrund (folgt dem Theme wie der Body) verdeckt darunter durchscrollenden Inhalt.
     tabRow.className = 'sticky top-0 z-20 -mt-2 flex gap-2 bg-slate-900 pb-3 pt-2';
-    this.mapTabBtn = document.createElement('button');
-    this.mapTabBtn.type = 'button';
-    this.mapTabBtn.textContent = 'Karte';
-    this.mapTabBtn.addEventListener('click', () => this.setTab('map'));
-    this.resourceTabBtn = document.createElement('button');
-    this.resourceTabBtn.type = 'button';
-    this.resourceTabBtn.textContent = 'Ressourcen';
-    this.resourceTabBtn.addEventListener('click', () => this.setTab('resources'));
-    this.diplomacyTabBtn = document.createElement('button');
-    this.diplomacyTabBtn.type = 'button';
-    this.diplomacyTabBtn.textContent = 'Diplomatie';
-    this.diplomacyTabBtn.addEventListener('click', () => this.setTab('diplomacy'));
-    this.airforceTabBtn = document.createElement('button');
-    this.airforceTabBtn.type = 'button';
-    this.airforceTabBtn.textContent = 'Airforce';
-    this.airforceTabBtn.addEventListener('click', () => this.setTab('airforce'));
-    this.navalTabBtn = document.createElement('button');
-    this.navalTabBtn.type = 'button';
-    this.navalTabBtn.textContent = 'Marine';
-    this.navalTabBtn.addEventListener('click', () => this.setTab('naval'));
-    this.researchTabBtn = document.createElement('button');
-    this.researchTabBtn.type = 'button';
-    this.researchTabBtn.textContent = 'Research';
-    this.researchTabBtn.addEventListener('click', () => this.setTab('research'));
+    tabRow.setAttribute('role', 'tablist');
+    // Icon + Name (unter sm nur das Icon), Tooltip nennt das Tastenkürzel - die Erklärung steht in der Spielhilfe.
+    const makeTab = (id: Tab): HTMLButtonElement => {
+      const info = TAB_HELP[id];
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.setAttribute('role', 'tab');
+      btn.setAttribute('aria-label', info.title);
+      btn.title = `${info.title} (${TAB_ORDER.indexOf(id) + 1})`;
+      const label = document.createElement('span');
+      label.className = 'hidden sm:inline';
+      label.textContent = info.title;
+      btn.append(uiIcon(info.icon, 16), label);
+      btn.addEventListener('click', () => this.setTab(id));
+      return btn;
+    };
+    this.mapTabBtn = makeTab('map');
+    this.resourceTabBtn = makeTab('resources');
+    this.diplomacyTabBtn = makeTab('diplomacy');
+    this.airforceTabBtn = makeTab('airforce');
+    this.navalTabBtn = makeTab('naval');
+    this.researchTabBtn = makeTab('research');
     tabRow.append(this.mapTabBtn, this.resourceTabBtn, this.diplomacyTabBtn, this.airforceTabBtn, this.navalTabBtn, this.researchTabBtn);
 
     this.notificationStack = document.createElement('div');
@@ -340,7 +333,7 @@ export class GameScreen {
 
     this.hint = document.createElement('p');
     this.hint.className = 'mb-3 hidden text-sm text-slate-400';
-    this.hint.textContent = RESEARCH_HINT;
+    this.hint.textContent = TAB_HELP.research.text;
 
     // Karte: ab lg füllt sie den Platz neben dem Auswahlpanel in voller Höhe und zentriert (siehe style.css, `map-lock`).
     const mapContainer = document.createElement('div');
@@ -355,7 +348,7 @@ export class GameScreen {
     // Statistik: ab lg hochkant als feste Leiste am linken Bildschirmrand (unter der Kopfzeile), sonst unter der Karte.
     this.statsPanel = document.createElement('div');
     this.statsPanel.className =
-      'mt-4 flex flex-col gap-2 rounded-md border border-slate-700 bg-slate-800/60 p-3 lg:fixed lg:bottom-0 lg:left-0 lg:top-[4.7rem] lg:z-10 lg:mt-0 lg:w-44 lg:rounded-l-none lg:border-l-0 lg:bg-slate-800';
+      'mt-4 flex flex-col gap-2.5 rounded-md border border-slate-500 bg-slate-800 p-3 lg:fixed lg:bottom-0 lg:left-0 lg:top-[4.95rem] lg:z-10 lg:mt-0 lg:w-44 lg:rounded-l-none lg:border-l-0';
 
     this.mapRow = document.createElement('div');
     this.mapRow.className = 'lock-row flex flex-col gap-4 lg:flex-row';
@@ -462,6 +455,17 @@ export class GameScreen {
     this.unsubscribers.push(client.onGameState((gameState) => this.render(gameState)));
     this.unsubscribers.push(client.onError((message) => this.showError(message)));
     this.unsubscribers.push(client.onBattle((battle) => this.showBattleConcluded(battle)));
+
+    // 1-6 wechseln die Reiter - nur in der Normalansicht (nicht im Kampf oder Spielende), nicht beim Tippen und nicht hinter dem Hilfe-Dialog.
+    const onKeyDown = (e: KeyboardEvent): void => {
+      if (e.ctrlKey || e.metaKey || e.altKey || isHelpOpen() || this.normalView.classList.contains('hidden')) return;
+      const target = e.target;
+      if (target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      const tab = TAB_ORDER[Number(e.key) - 1];
+      if (tab) this.setTab(tab);
+    };
+    document.addEventListener('keydown', onKeyDown);
+    this.unsubscribers.push(() => document.removeEventListener('keydown', onKeyDown));
 
     this.currentGameState = initialGameState;
     this.setTab('map');
@@ -777,12 +781,18 @@ export class GameScreen {
 
   private setTab(tab: Tab): void {
     this.activeTab = tab;
-    this.mapTabBtn.className = tab === 'map' ? primaryBtnClass : secondaryBtnClass;
-    this.resourceTabBtn.className = tab === 'resources' ? primaryBtnClass : secondaryBtnClass;
-    this.diplomacyTabBtn.className = tab === 'diplomacy' ? primaryBtnClass : secondaryBtnClass;
-    this.airforceTabBtn.className = tab === 'airforce' ? primaryBtnClass : secondaryBtnClass;
-    this.researchTabBtn.className = tab === 'research' ? primaryBtnClass : secondaryBtnClass;
-    this.navalTabBtn.className = tab === 'naval' ? primaryBtnClass : secondaryBtnClass;
+    const tabButtons: readonly (readonly [Tab, HTMLButtonElement])[] = [
+      ['map', this.mapTabBtn],
+      ['resources', this.resourceTabBtn],
+      ['diplomacy', this.diplomacyTabBtn],
+      ['airforce', this.airforceTabBtn],
+      ['naval', this.navalTabBtn],
+      ['research', this.researchTabBtn],
+    ];
+    for (const [id, btn] of tabButtons) {
+      btn.className = tabBtnClass(id === tab);
+      btn.setAttribute('aria-selected', String(id === tab));
+    }
     this.map.setSeaInteractive(tab === 'naval');
     // Über der Karte steht kein Hinweistext (mehr Platz für die Karte) - nur der Research-Tab erklärt sich noch.
     this.hint.classList.toggle('hidden', tab !== 'research');
@@ -845,9 +855,7 @@ export class GameScreen {
     const isMyTurn = gameState.activePlayerId === this.client.playerId;
     const myPoints = gameState.resources.get(this.client.playerId) ?? 0;
     const gameOver = isGameOver(gameState);
-    this.turnStatus.textContent = `Runde ${gameState.turn} — ${
-      isMyTurn ? 'Du bist am Zug' : `${activePlayer?.name ?? '?'} ist am Zug`
-    } — ${myPoints} Rüstungspunkte`;
+    this.renderTurnStatus(gameState.turn, activePlayer, isMyTurn, myPoints);
     this.endTurnBtn.disabled = !isMyTurn || gameState.pendingBattle !== null || gameState.pendingSeaBattle !== null || gameOver;
 
     this.renderStatsPanel(gameState);
@@ -867,6 +875,42 @@ export class GameScreen {
     this.syncLayout();
   }
 
+  /** Zugleiste: Runde, wer am Zug ist (Farbpunkt + Name) und die eigenen Rüstungspunkte - jeweils einzeln lesbar statt in einem Satz. */
+  private renderTurnStatus(turn: number, activePlayer: Player | undefined, isMyTurn: boolean, myPoints: number): void {
+    const round = document.createElement('div');
+    round.className = 'flex items-baseline gap-1.5';
+    const roundLabel = document.createElement('span');
+    roundLabel.className = 'label-caps text-xs text-slate-500';
+    roundLabel.textContent = 'Runde';
+    const roundNumber = document.createElement('span');
+    roundNumber.className = 'font-mono text-xl font-medium leading-none';
+    roundNumber.textContent = String(turn);
+    round.append(roundLabel, roundNumber);
+
+    const turnOwner = document.createElement('div');
+    turnOwner.className = 'flex items-center gap-2 text-sm';
+    const dot = document.createElement('span');
+    dot.className = `h-3 w-3 shrink-0 rounded-full border border-slate-100 ${isMyTurn ? '' : 'opacity-60'}`;
+    dot.style.background = activePlayer?.color ?? 'transparent';
+    const who = document.createElement('span');
+    who.className = isMyTurn ? 'font-semibold text-slate-100' : 'text-slate-400';
+    who.textContent = isMyTurn ? 'Du bist am Zug' : `${activePlayer?.name ?? '?'} ist am Zug`;
+    turnOwner.append(dot, who);
+
+    const points = document.createElement('div');
+    points.className = 'flex items-center gap-1.5';
+    points.title = 'Rüstungspunkte: damit rekrutierst du Einheiten, baust Fabriken aus und erforschst Technologien';
+    const pointsValue = document.createElement('span');
+    pointsValue.className = 'font-mono text-base font-medium';
+    pointsValue.textContent = String(myPoints);
+    const pointsLabel = document.createElement('span');
+    pointsLabel.className = 'text-sm text-slate-400';
+    pointsLabel.textContent = 'Rüstungspunkte';
+    points.append(uiIcon('points', 16), pointsValue, pointsLabel);
+
+    this.turnStatus.replaceChildren(round, turnOwner, points);
+  }
+
   /** How many territories each faction currently holds, sorted most-held-first, as both a
    *  proportional bar and an exact count - "wie viele Felder welcher Farbe gehören". Hochkant: the
    *  bar runs vertically beside the list (a fixed strip on the left screen edge from lg up, see the
@@ -876,7 +920,7 @@ export class GameScreen {
     this.statsPanel.replaceChildren();
 
     const title = document.createElement('div');
-    title.className = 'text-center text-[11px] font-semibold uppercase tracking-wide text-slate-400';
+    title.className = 'label-caps border-b border-slate-600 pb-1.5 text-center text-[13px] text-slate-300';
     title.textContent = 'Gebietsverteilung';
     this.statsPanel.appendChild(title);
 
@@ -915,7 +959,7 @@ export class GameScreen {
       name.textContent = label;
       left.append(swatch, name);
       const countEl = document.createElement('span');
-      countEl.className = 'shrink-0 tabular-nums';
+      countEl.className = 'shrink-0 font-mono font-medium';
       countEl.textContent = String(count);
       row.append(left, countEl);
       list.appendChild(row);
@@ -1106,7 +1150,7 @@ export class GameScreen {
     const header = document.createElement('div');
     header.className = 'mb-3 text-center';
     const title = document.createElement('h2');
-    title.className = 'text-lg font-semibold text-slate-100';
+    title.className = 'label-caps text-2xl leading-none text-slate-100';
     title.textContent = `Kampf um ${territoryName}`;
     const subtitle = document.createElement('p');
     subtitle.className = 'text-sm text-slate-400';
@@ -1244,7 +1288,7 @@ export class GameScreen {
     info.className = 'text-center text-sm text-slate-300';
     info.textContent = 'Klicke auf deine Felder, um Einheiten zu platzieren - Rechtsklick nimmt sie zurück. Shift+Klick platziert bzw. entfernt 10 auf einmal.';
     const cityInfo = document.createElement('p');
-    cityInfo.className = 'text-center text-xs text-yellow-400';
+    cityInfo.className = 'text-center text-xs font-medium text-slate-300';
     cityInfo.textContent =
       role === 'attacker'
         ? `Gelb umrandete Felder sind Städte - erobere alle 6, um sofort zu gewinnen. Nach Runde ${MAX_BATTLE_ROUNDS} ohne Erfolg gewinnt der Verteidiger automatisch - also nicht zu lange zögern.`
@@ -1413,7 +1457,7 @@ export class GameScreen {
     drawBtn.type = 'button';
     drawBtn.textContent = myDrawOffered ? 'Unentschieden angeboten...' : enemyDrawOffered ? 'Unentschieden annehmen' : 'Unentschieden anbieten';
     drawBtn.className = enemyDrawOffered && !myDrawOffered ? primaryBtnClass : secondaryBtnClass;
-    drawBtn.title = 'Beide Seiten müssen zustimmen - die Schlacht endet dann unverändert: keine Gebiete wechseln, der Restbestand beider Seiten bleibt.';
+    drawBtn.title = 'Beide Seiten müssen zustimmen - die Schlacht endet dann unverändert: keine Gebiete wechseln, der Restbestand beider Seiten bleibt. Eine KI stimmt zu, wenn sie nicht mehr gewinnen kann.';
     drawBtn.disabled = myDrawOffered;
     drawBtn.addEventListener('click', () => this.client.proposeBattleDraw());
     actionBtns.append(bombardBtn, airSupportBtn, nukeBtn, drawBtn, endBattleTurnBtn);
@@ -1825,7 +1869,7 @@ export class GameScreen {
     }
 
     const chartTitle = document.createElement('div');
-    chartTitle.className = 'text-center text-xs font-semibold uppercase tracking-wide text-slate-400';
+    chartTitle.className = 'label-caps text-center text-[13px] text-slate-300';
     chartTitle.textContent = 'Kräfteverhältnis';
 
     const chart = document.createElement('div');
@@ -1981,10 +2025,10 @@ export class GameScreen {
   } {
     const el = document.createElement('div');
     el.className =
-      'fixed right-4 top-56 z-30 hidden max-h-[65vh] w-72 max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto rounded-md border border-amber-500/50 bg-amber-500/10 p-3 shadow-lg shadow-slate-950/50';
+      'fixed right-4 top-56 z-30 hidden max-h-[65vh] w-72 max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto frame rounded-md bg-slate-800 p-3 shadow-lg';
 
     const title = document.createElement('div');
-    title.className = 'text-center text-xs font-semibold uppercase tracking-wide text-amber-400';
+    title.className = 'label-caps text-center text-[13px] text-slate-300';
     title.textContent = options?.title ?? 'Einheiten auswählen';
 
     const bulkRow = document.createElement('div');
@@ -2424,7 +2468,7 @@ export class GameScreen {
   /** Backdrop + card shell shared by every modal. */
   private openModal(title: string, onClose?: () => void): { card: HTMLDivElement; close: () => void } {
     const backdrop = document.createElement('div');
-    backdrop.className = 'fixed inset-0 z-20 flex items-center justify-center bg-slate-950/70 p-4';
+    backdrop.className = 'fixed inset-0 z-20 flex items-center justify-center bg-[rgb(20_18_12/0.62)] p-4';
     // Routes both the returned close() and a backdrop click through the same path, so a caller's
     // onClose (e.g. clearing a tracked "this modal is open" reference) fires either way.
     const close = (): void => {
@@ -2436,10 +2480,10 @@ export class GameScreen {
     });
 
     const card = document.createElement('div');
-    card.className = 'flex w-full max-w-sm flex-col gap-4 rounded-lg border border-slate-700 bg-slate-800 p-5';
+    card.className = 'frame flex w-full max-w-sm flex-col gap-4 rounded-lg bg-slate-800 p-5';
 
     const titleEl = document.createElement('h3');
-    titleEl.className = 'text-base font-semibold text-slate-100';
+    titleEl.className = 'label-caps text-xl leading-none text-slate-100';
     titleEl.textContent = title;
     card.appendChild(titleEl);
 
@@ -2658,9 +2702,9 @@ export class GameScreen {
   ): { el: HTMLDivElement; getSelection: () => { readonly ships: number; readonly units: UnitComposition } } {
     const el = document.createElement('div');
     el.className =
-      'fixed right-4 top-56 z-30 flex max-h-[65vh] w-72 max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto rounded-md border border-amber-500/50 bg-amber-500/10 p-3 shadow-lg shadow-slate-950/50';
+      'fixed right-4 top-56 z-30 flex max-h-[65vh] w-72 max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto frame rounded-md bg-slate-800 p-3 shadow-lg';
     const titleEl = document.createElement('div');
-    titleEl.className = 'text-center text-xs font-semibold uppercase tracking-wide text-amber-400';
+    titleEl.className = 'label-caps text-center text-[13px] text-slate-300';
     titleEl.textContent = title;
 
     type Row = { readonly key: string; readonly kind: 'ship' | keyof UnitComposition };
@@ -2955,7 +2999,7 @@ export class GameScreen {
 
     const el = document.createElement('div');
     el.className =
-      'fixed right-4 top-56 z-30 flex max-h-[65vh] w-72 max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto rounded-md border border-sky-500/50 bg-slate-900/95 p-3 shadow-lg shadow-slate-950/50';
+      'fixed right-4 top-56 z-30 flex max-h-[65vh] w-72 max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto frame rounded-md bg-slate-800 p-3 shadow-lg';
 
     const titleRow = document.createElement('div');
     titleRow.className = 'flex items-center gap-2 text-sm font-semibold text-slate-100';

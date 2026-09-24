@@ -7,6 +7,7 @@ import { projectableFightersAt } from '../engine/airforce';
 import { UNIT_ICON_PATHS, UNIT_TYPES } from './unitIcons';
 import { AIRCRAFT_ICON_PATHS, AIRCRAFT_TYPES } from './aircraftIcons';
 import { SHIP_ICON_PATH } from './shipIcons';
+import { createCoastLayer } from './coastLayer';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -31,20 +32,19 @@ function airSuperiorityColor(myFighters: number, enemyFighters: number): string 
 // Hover/drag/drop-target cues are drawn as a stroke, never a fill: fill carries real information
 // (who owns this territory), and overwriting it - even temporarily, even just for the exact
 // territory the pointer happens to land on right after a drop - would hide that while it lasts.
-// (Style is applied via inline style rather than Tailwind classes for the same underlying
-// reason a class wouldn't work here: an element's base fill and a class-based stroke would
-// carry equal CSS specificity, so whichever rule lands later in Tailwind's generated stylesheet
-// wins - not necessarily the one added last in JS. Inline style always wins over a class.)
+// They live in their own overlay layer (see showCue) as outline copies of the territory instead of
+// restyling the territory's own path: touching a base path made Chrome re-rasterize every polygon in
+// that area on each hover (25 instead of 17 ms per mouse step at 1440p) - now the base is never touched.
 const RELATED_STROKE = '#fbbf24'; // amber-400
-const RELATED_STROKE_WIDTH = '0.15';
-const HOVERED_STROKE_WIDTH = '0.22';
+const RELATED_STROKE_WIDTH = '1.6';
+const HOVERED_STROKE_WIDTH = '2.2';
 
 // The "currently selected" outline is a separate overlay path (same `d` as the territory, drawn
 // on top) rather than styling the territory's own stroke like hover/drag do - that would conflict
 // the moment the pointer also hovers or drags across the same shape, since onEnter/onLeave own
 // that property too and would clobber a persistent selection the instant the pointer left.
 const SELECTED_STROKE = '#fbbf24'; // amber-400
-const SELECTED_STROKE_WIDTH = '0.3';
+const SELECTED_STROKE_WIDTH = '2.4';
 
 // Diplomacy tab colors (see applyDiplomacyView) - unoccupied territories fall through to
 // NEUTRAL_COLOR the same as every other view, so there's no separate constant for that case.
@@ -65,11 +65,89 @@ const OTHER_UNITS_COLOR = 'white';
 /** Zeilenabstand der Garnisons-Zeilen (eine je Einheitentyp) - auch für das Schiffslabel darüber (drawShipLabel). */
 const GARRISON_LINE_HEIGHT = 0.7;
 
-// Seezonen: dezent bläulich (unbesetzt), mit der Besitzerfarbe halbtransparent getönt, sobald jemand sie hält.
-const SEA_FILL = '#2a6fb5';
-const SEA_FILL_OPACITY_FREE = '0.22';
+// Kartenstil: Kartenpapier + Tinte statt Bildschirmblau. Die Seefarben kommen aus den Theme-Variablen (style.css), damit sie mit
+// Hell/Dunkel wechseln: unbesetzte Seezonen als Farbwäsche, besetzte in der Besitzerfarbe halbtransparent auf dem Papier.
+const SEA_FILL = 'var(--color-sea)';
+const SEA_FILL_STRONG = 'var(--color-sea-strong)'; // Marine-Tab: die See soll dort deutlich hervortreten
+const SEA_FILL_OPACITY_FREE = '1';
 const SEA_FILL_OPACITY_OWNED = '0.5';
-const SEA_STROKE = '#7dd3fc'; // sky-300
+const SEA_FILL_OPACITY_OWNED_NAVAL = '0.85';
+const SEA_INK = 'var(--color-sea-ink)'; // Schrift der Seenamen
+/** Breite der Europa-Karte (viewBox) - für sie sind alle Schrift- und Symbolgrößen der Beschriftung in Karteneinheiten festgelegt. */
+const LABEL_DESIGN_WIDTH = 55.37;
+
+/** Tintenfarbe für alles, was über den Fraktionsfarben liegt (Grenzen, Küste, Beschriftungskontur) - fest, nicht themenabhängig,
+ *  weil die Landflächen in beiden Themes dieselben Fraktionsfarben tragen. */
+const INK = '#1c1b16';
+const LABEL_OUTLINE = '#14130f';
+
+/** Gradnetz wie auf einer Plankarte: gepunktete Längen- und Breitenkreise alle 10 Grad, am Rand mit ihren Gradzahlen. Die
+ *  Projektion steht in TerritoryData.lonScale (x = Länge * lonScale, y = -Breite); ohne sie bleibt die Ebene leer. */
+function buildGraticule(data: TerritoryData): SVGGElement {
+  const g = document.createElementNS(SVG_NS, 'g');
+  g.classList.add('pointer-events-none');
+  const scale = data.lonScale;
+  const [x0, y0, w, h] = data.viewBox.split(/\s+/).map(Number) as [number, number, number, number];
+  if (!scale) return g;
+  const fontSize = w * 0.0105;
+  const STEP = 10;
+
+  const line = (x1: number, y1: number, x2: number, y2: number): SVGLineElement => {
+    const el = document.createElementNS(SVG_NS, 'line');
+    el.setAttribute('x1', String(x1));
+    el.setAttribute('y1', String(y1));
+    el.setAttribute('x2', String(x2));
+    el.setAttribute('y2', String(y2));
+    el.setAttribute('vector-effect', 'non-scaling-stroke');
+    el.style.stroke = 'var(--color-slate-500)';
+    el.style.strokeOpacity = '0.5';
+    el.style.strokeWidth = '1.2';
+    el.style.strokeDasharray = '0.5 6';
+    el.style.strokeLinecap = 'round';
+    return el;
+  };
+  const label = (x: number, y: number, text: string, anchor: 'start' | 'middle'): SVGTextElement => {
+    const el = document.createElementNS(SVG_NS, 'text');
+    el.setAttribute('x', String(x));
+    el.setAttribute('y', String(y));
+    el.setAttribute('text-anchor', anchor);
+    el.setAttribute('font-size', String(fontSize));
+    el.style.fill = 'var(--color-slate-500)';
+    el.style.fontFamily = 'var(--font-mono)';
+    el.style.fontWeight = '500';
+    el.style.letterSpacing = '0.04em';
+    el.textContent = text;
+    return el;
+  };
+
+  for (let lat = Math.ceil(-(y0 + h) / STEP) * STEP; lat <= -y0; lat += STEP) {
+    const y = -lat;
+    g.appendChild(line(x0, y, x0 + w, y));
+    if (y > y0 + fontSize * 2 && y < y0 + h - fontSize) {
+      g.appendChild(label(x0 + fontSize * 0.7, y - fontSize * 0.4, `${Math.abs(lat)}°${lat === 0 ? '' : lat > 0 ? 'N' : 'S'}`, 'start'));
+    }
+  }
+  for (let lon = Math.ceil(x0 / scale / STEP) * STEP; lon * scale <= x0 + w; lon += STEP) {
+    const x = lon * scale;
+    g.appendChild(line(x, y0, x, y0 + h));
+    if (x > x0 + fontSize * 4 && x < x0 + w - fontSize * 3) {
+      g.appendChild(label(x, y0 + fontSize * 1.6, `${Math.abs(lon)}°${lon === 0 ? '' : lon > 0 ? 'E' : 'W'}`, 'middle'));
+    }
+  }
+  return g;
+}
+
+/** Eine deckungsgleiche, nicht anklickbare SVG-Ebene über der Karte (dieselbe viewBox, füllt das Kartenblatt). `will-change: transform` macht
+ *  sie zur eigenen Compositor-Ebene: ihr Inhalt wird einmal gerastert und beim Hovern der Basis-Ebene nicht neu gezeichnet - und
+ *  umgekehrt zeichnet ein Neuaufbau der Beschriftung nicht die Länder neu. */
+function overlaySvg(viewBox: string): SVGSVGElement {
+  const el = document.createElementNS(SVG_NS, 'svg');
+  el.setAttribute('viewBox', viewBox);
+  el.setAttribute('aria-hidden', 'true');
+  el.classList.add('pointer-events-none', 'absolute', 'inset-0', 'h-full', 'w-full');
+  el.style.willChange = 'transform';
+  return el;
+}
 
 interface CapitalMarker {
   readonly capitalId: string;
@@ -83,7 +161,13 @@ export interface DragHandler {
 }
 
 export class MapRenderer {
+  /** Basis-Ebene: Seezonen, Kartennetz und Länder - alles, was Hover, Klick und Drag bekommt. */
   private readonly svg: SVGSVGElement;
+  /** Hover-, Drag- und Nachbar-Umrisse (siehe showCue) - eine kleine eigene Ebene, damit die Basis beim Hovern nie neu gezeichnet wird. */
+  private readonly cueSvg: SVGSVGElement;
+  private readonly cuePaths = new Map<string, SVGPathElement>();
+  /** Oberste Ebene: Auswahl-Umrisse, Markierungen, Beschriftung und Drag-Linie (nie anklickbar). */
+  private readonly topSvg: SVGSVGElement;
   private readonly selectionLayer: SVGGElement;
   private readonly markerLayer: SVGGElement;
   private readonly tooltip: HTMLDivElement;
@@ -101,14 +185,28 @@ export class MapRenderer {
   /** Whose units count as "own" (green) and whose as "friendly" (blue) - see applyGameState. */
   private viewerId: string | null = null;
 
+  /** Faktor für Zahlen, Symbole und Namen: breitere Karten (Asien) haben pro Einheit weniger Pixel, ihre Beschriftung wäre sonst winzig. */
+  private readonly labelScale: number;
+
   constructor(container: HTMLElement, data: TerritoryData) {
+    const viewBoxWidth = Number(data.viewBox.split(/\s+/)[2]);
+    this.labelScale = Math.max(1, (viewBoxWidth / LABEL_DESIGN_WIDTH) * 0.9);
     this.svg = document.createElementNS(SVG_NS, 'svg');
     this.svg.setAttribute('viewBox', data.viewBox);
-    this.svg.classList.add('block', 'w-full', 'h-auto', 'touch-none');
+    // Der Kartenrand als feine Tintenlinie um die Zeichenfläche (die "Neatline" eines gedruckten Kartenblatts) - `wrap` unten
+    // liefert Papier und Doppelrahmen darum.
+    this.svg.classList.add('block', 'w-full', 'h-auto', 'touch-none', 'outline', 'outline-1', 'outline-slate-100/70');
 
     this.tooltip = document.createElement('div');
     this.tooltip.className =
-      'pointer-events-none fixed hidden -translate-x-1/2 -translate-y-[130%] rounded-md border border-slate-600 bg-slate-800 px-2.5 py-1 text-sm font-semibold text-slate-100 shadow-lg z-10';
+      'pointer-events-none fixed hidden -translate-x-1/2 -translate-y-[130%] rounded-md border border-slate-100 bg-slate-800 px-2.5 py-1 font-display text-[15px] font-bold uppercase leading-5 tracking-[0.08em] text-slate-100 shadow-md z-10';
+
+    // Die Küstenlinien (Wasserbänder + Tintenküste) sind eine eigene, statische Ebene über der Karte (ein Canvas, siehe coastLayer.ts):
+    // im selben SVG wie die Länder wurden sie bei jedem Hover neu gerastert (Messung: 25 statt 17 ms pro Mausschritt). Da sie auf
+    // das Wasser beschnitten sind, fallen sie nie auf Land; ihre Lage über den Ländern ändert nichts am Bild.
+    const coastLayer = createCoastLayer(data);
+    this.cueSvg = overlaySvg(data.viewBox);
+    this.topSvg = overlaySvg(data.viewBox);
 
     // Seezonen zuerst: sie liegen unter dem Land, sichtbar bleibt nur das Wasser. Standardmäßig nicht anklickbar
     // (Lobby/Setup); GameScreen schaltet sie per setSeaInteractive frei.
@@ -120,11 +218,10 @@ export class MapRenderer {
       el.setAttribute('data-id', zone.id);
       el.style.fill = SEA_FILL;
       el.style.fillOpacity = SEA_FILL_OPACITY_FREE;
-      el.style.stroke = SEA_STROKE;
-      el.style.strokeOpacity = '0.35';
       el.style.pointerEvents = 'none';
       el.setAttribute('fill-rule', 'evenodd');
-      el.classList.add('[stroke-width:0.05]', '[vector-effect:non-scaling-stroke]');
+      // Zonengrenzen als gestrichelte Seegrenzen.
+      el.classList.add('[stroke:var(--color-sea-line)]', '[stroke-dasharray:5_4]', '[stroke-width:0.9]', '[vector-effect:non-scaling-stroke]');
       el.addEventListener('pointerenter', () => this.onEnter(zone));
       el.addEventListener('pointermove', (e) => this.onMove(e));
       el.addEventListener('pointerleave', () => this.onLeave());
@@ -136,6 +233,8 @@ export class MapRenderer {
       this.pathsById.set(zone.id, el);
     }
 
+    this.svg.appendChild(buildGraticule(data));
+
     for (const territory of data.territories) {
       this.territoriesById.set(territory.id, territory);
 
@@ -145,11 +244,12 @@ export class MapRenderer {
       el.style.fill = NEUTRAL_COLOR;
       el.classList.add(
         'cursor-pointer',
-        // Fixed (not theme-reactive) so borders stay dark and readable against both the light
-        // theme's near-white sea and the dark theme's navy one - gray, not slate, so it isn't
-        // caught up in style.css's slate-scale remap between the two themes.
-        'stroke-gray-900',
-        '[stroke-width:0.07]',
+        // Grenzen in fester Tinte (nicht themenabhängig): sie liegen auf den Fraktionsfarben, die in beiden Themes gleich sind.
+        // Halbdurchsichtig, damit Binnengrenzen leiser bleiben als die Küste (siehe coastLayer.ts).
+        '[stroke:#1c1b16]',
+        '[stroke-opacity:0.5]',
+        '[stroke-width:0.7]',
+        '[stroke-linejoin:round]',
         '[vector-effect:non-scaling-stroke]',
         'transition-colors',
       );
@@ -166,18 +266,58 @@ export class MapRenderer {
 
     this.selectionLayer = document.createElementNS(SVG_NS, 'g');
     this.selectionLayer.classList.add('pointer-events-none');
-    this.svg.appendChild(this.selectionLayer);
+    this.topSvg.appendChild(this.selectionLayer);
 
     this.markerLayer = document.createElementNS(SVG_NS, 'g');
     this.markerLayer.classList.add('pointer-events-none');
-    this.svg.appendChild(this.markerLayer);
+    // Zahlen auf der Karte in derselben Ziffernschrift wie die Zugleiste.
+    this.markerLayer.style.fontFamily = 'var(--font-mono)';
+    this.topSvg.appendChild(this.markerLayer);
 
+    // Kartenblatt: Papier, Doppelrahmen (`frame`) und ein Innenabstand, in dem die Rahmenlinien sichtbar bleiben (7px Rand +
+    // 1px Neatline = die 16px, die style.css's `.map-fit` in der Höhe einrechnet). Darin die drei Ebenen übereinander; die Basis
+    // gibt die Größe vor, die Overlays füllen sie deckungsgleich aus.
+    const sheet = document.createElement('div');
+    sheet.className = 'relative';
+    sheet.append(this.svg, coastLayer, this.cueSvg, this.topSvg);
     const wrap = document.createElement('div');
-    wrap.className = 'rounded-xl border border-slate-700 bg-slate-950 overflow-hidden';
-    wrap.appendChild(this.svg);
+    wrap.className = 'frame rounded-md bg-slate-950 p-[7px]';
+    wrap.appendChild(sheet);
 
     container.appendChild(wrap);
     container.appendChild(this.tooltip);
+  }
+
+  /** Eine Gruppe für alles, was zu einem Ort gehört (Zahlen, Symbole, Namen), um dessen Mittelpunkt auf die Kartenbreite skaliert. */
+  private labelGroup(cx: number, cy: number): SVGGElement {
+    const group = document.createElementNS(SVG_NS, 'g');
+    if (this.labelScale !== 1) group.setAttribute('transform', `translate(${cx} ${cy}) scale(${this.labelScale}) translate(${-cx} ${-cy})`);
+    this.markerLayer.appendChild(group);
+    return group;
+  }
+
+  /** Zeigt den Umriss eines Gebiets (oder einer Seezone) als kräftige Linie in `stroke` - als Kopie in der Hinweis-Ebene statt durch
+   *  Umstylen des Basis-Pfads. Das zuletzt gezeigte liegt oben (der angehoverte Umriss über den Nachbar-Umrissen). Die Kopie entsteht
+   *  beim ersten Mal und bleibt danach für weitere Hover erhalten. */
+  private showCue(id: string, stroke: string, width: string): void {
+    const territory = this.territoriesById.get(id);
+    if (!territory) return;
+    let el = this.cuePaths.get(id);
+    if (!el) {
+      el = document.createElementNS(SVG_NS, 'path');
+      el.setAttribute('d', territory.path);
+      el.setAttribute('fill', 'none');
+      el.setAttribute('vector-effect', 'non-scaling-stroke');
+      el.setAttribute('stroke-linejoin', 'round');
+      this.cuePaths.set(id, el);
+    }
+    el.style.stroke = stroke;
+    el.style.strokeWidth = width;
+    this.cueSvg.appendChild(el);
+  }
+
+  private hideCue(id: string): void {
+    this.cuePaths.get(id)?.remove();
   }
 
   /** Macht die Seezonen anklickbar/ziehbar (im laufenden Spiel) oder wieder inaktiv (Lobby). */
@@ -281,23 +421,23 @@ export class MapRenderer {
     for (const [id, state] of gameState.territoryState) {
       if ((state.ships ?? 0) > 0) this.drawShipLabel(id, state.ships ?? 0, state.shipsMovedIn ?? 0, state.ownerId === viewerId);
     }
-    this.paintSeaZones(gameState, viewerId);
+    this.paintSeaZones(gameState, viewerId, true);
+    // Das Land tritt zurück (gedämpft), die See steht im Vordergrund.
     for (const [id, el] of this.pathsById) {
       if (!this.seaIds.has(id)) el.style.fillOpacity = '0.55';
-      else el.style.fillOpacity = (gameState.seaZones.get(id)?.ships ?? 0) > 0 ? '0.8' : '0.4';
     }
   }
 
   /** Färbt Seezonen nach Besitzer und zeichnet Name, Schiffsanzahl (verfügbar/gesamt) und eingeschiffte Truppen. */
-  private paintSeaZones(gameState: GameState, viewerId: string | null): void {
+  private paintSeaZones(gameState: GameState, viewerId: string | null, naval = false): void {
     for (const id of this.seaIds) {
       const el = this.pathsById.get(id);
       const zone = this.territoriesById.get(id);
       if (!el || !zone) continue;
       const state = gameState.seaZones.get(id);
       const owner = state && state.ships > 0 && state.ownerId ? gameState.players.find((p) => p.id === state.ownerId) : undefined;
-      el.style.fill = owner?.color ?? SEA_FILL;
-      el.style.fillOpacity = owner ? SEA_FILL_OPACITY_OWNED : SEA_FILL_OPACITY_FREE;
+      el.style.fill = owner?.color ?? (naval ? SEA_FILL_STRONG : SEA_FILL);
+      el.style.fillOpacity = owner ? (naval ? SEA_FILL_OPACITY_OWNED_NAVAL : SEA_FILL_OPACITY_OWNED) : SEA_FILL_OPACITY_FREE;
       this.drawSeaLabel(zone, state, state?.ownerId === viewerId);
     }
   }
@@ -306,19 +446,23 @@ export class MapRenderer {
     const [rawCx, rawCy] = zone.centroid;
     const cx = rawCx ?? 0;
     const cy = rawCy ?? 0;
+    const group = this.labelGroup(cx, cy);
     const name = document.createElementNS(SVG_NS, 'text');
     name.setAttribute('x', String(cx));
     name.setAttribute('y', String(cy));
     name.setAttribute('text-anchor', 'middle');
-    name.setAttribute('font-size', '0.4');
-    name.setAttribute('font-style', 'italic');
-    name.setAttribute('fill', '#bae6fd');
-    name.setAttribute('fill-opacity', '0.8');
-    name.setAttribute('stroke', '#0c4a6e');
-    name.setAttribute('stroke-width', '0.04');
+    // Seenamen wie auf einer Seekarte: gesperrte Versalien in Seetinte; der Hof in Wasserfarbe hält das Gradnetz aus der Schrift.
+    name.setAttribute('font-size', '0.44');
+    name.setAttribute('stroke-width', '0.1');
     name.setAttribute('paint-order', 'stroke');
+    name.style.fontFamily = 'var(--font-display)';
+    name.style.fontWeight = '700';
+    name.style.letterSpacing = '0.26em';
+    name.style.textTransform = 'uppercase';
+    name.style.fill = SEA_INK;
+    name.style.stroke = SEA_FILL;
     name.textContent = zone.name;
-    this.markerLayer.appendChild(name);
+    group.appendChild(name);
     if (!state) return;
     const row: { readonly icon: string; readonly text: string }[] = [];
     if (state.ships > 0) {
@@ -327,32 +471,32 @@ export class MapRenderer {
     }
     const troops = totalUnits(state.embarked);
     if (troops > 0) row.push({ icon: UNIT_ICON_PATHS.infantry, text: String(troops) });
-    row.forEach((entry, i) => this.drawIconCount(cx, cy + 0.55 + i * 0.6, entry.icon, entry.text, own ? OWN_UNITS_COLOR : OTHER_UNITS_COLOR, 0.5));
+    row.forEach((entry, i) => this.drawIconCount(group, cx, cy + 0.55 + i * 0.6, entry.icon, entry.text, own ? OWN_UNITS_COLOR : OTHER_UNITS_COLOR, 0.5));
   }
 
   /** Ein weißes Symbol (SVG-Pfad) mit Zahl daneben, mittig um `cx`. */
-  private drawIconCount(cx: number, y: number, iconPaths: string, text: string, fill: string, fontSize: number): void {
+  private drawIconCount(parent: SVGElement, cx: number, y: number, iconPaths: string, text: string, fill: string, fontSize: number): void {
     const iconSize = fontSize * 0.95;
     const icon = document.createElementNS(SVG_NS, 'g');
     icon.setAttribute('transform', `translate(${cx - 0.05 - iconSize}, ${y - iconSize * 0.85}) scale(${iconSize / 16})`);
     icon.setAttribute('fill', 'white');
-    icon.setAttribute('stroke', 'black');
+    icon.setAttribute('stroke', LABEL_OUTLINE);
     icon.setAttribute('stroke-width', '1.4');
     icon.setAttribute('paint-order', 'stroke');
     icon.innerHTML = iconPaths;
-    this.markerLayer.appendChild(icon);
+    parent.appendChild(icon);
     const label = document.createElementNS(SVG_NS, 'text');
     label.setAttribute('x', String(cx + 0.05));
     label.setAttribute('y', String(y));
     label.setAttribute('text-anchor', 'start');
     label.setAttribute('font-size', String(fontSize));
-    label.setAttribute('font-weight', '700');
+    label.setAttribute('font-weight', '600');
     label.setAttribute('fill', fill);
-    label.setAttribute('stroke', 'black');
+    label.setAttribute('stroke', LABEL_OUTLINE);
     label.setAttribute('stroke-width', '0.055');
     label.setAttribute('paint-order', 'stroke');
     label.textContent = text;
-    this.markerLayer.appendChild(label);
+    parent.appendChild(label);
   }
 
   /** Schiffe im Hafen eines Küstengebiets: eine Zeile oberhalb der Garnison (`garrisonRows` = deren Zeilenzahl,
@@ -362,9 +506,10 @@ export class MapRenderer {
     if (!territory) return;
     const [rawCx, rawCy] = territory.centroid;
     const cy = rawCy ?? 0;
+    const group = this.labelGroup(rawCx ?? 0, cy);
     const avail = ships - movedIn;
     const y = garrisonRows > 0 ? cy + 0.5 - ((garrisonRows - 1) * GARRISON_LINE_HEIGHT) / 2 - GARRISON_LINE_HEIGHT : cy - 0.15;
-    this.drawIconCount(rawCx ?? 0, y, SHIP_ICON_PATH, avail < ships ? `${avail}/${ships}` : String(ships), own ? OWN_UNITS_COLOR : OTHER_UNITS_COLOR, 0.44);
+    this.drawIconCount(group, rawCx ?? 0, y, SHIP_ICON_PATH, avail < ships ? `${avail}/${ships}` : String(ships), own ? OWN_UNITS_COLOR : OTHER_UNITS_COLOR, 0.44);
   }
 
   /** Colors territories by their current Rüstungspunkte-Wert (base value plus factories built
@@ -473,15 +618,23 @@ export class MapRenderer {
       const territory = this.territoriesById.get(capitalId);
       if (!territory) continue;
       const [cx, cy] = territory.centroid;
-      const marker = document.createElementNS(SVG_NS, 'circle');
-      marker.setAttribute('cx', String(cx));
-      marker.setAttribute('cy', String(cy));
-      marker.setAttribute('r', '0.25');
+      // Hauptstädte als Stern in der Fraktionsfarbe mit Tintenrand - die klassische Kartenmarkierung.
+      const centreX = cx ?? 0;
+      const centreY = cy ?? 0;
+      const group = this.labelGroup(centreX, centreY);
+      const points = Array.from({ length: 10 }, (_, i) => {
+        const angle = -Math.PI / 2 + (i * Math.PI) / 5;
+        const radius = i % 2 === 0 ? 0.3 : 0.13;
+        return `${centreX + radius * Math.cos(angle)},${centreY + radius * Math.sin(angle)}`;
+      }).join(' ');
+      const marker = document.createElementNS(SVG_NS, 'polygon');
+      marker.setAttribute('points', points);
       marker.setAttribute('fill', color);
-      marker.setAttribute('stroke', 'white');
-      marker.setAttribute('stroke-width', '0.06');
+      marker.setAttribute('stroke', INK);
+      marker.setAttribute('stroke-width', '1.3');
+      marker.setAttribute('stroke-linejoin', 'round');
       marker.setAttribute('vector-effect', 'non-scaling-stroke');
-      this.markerLayer.appendChild(marker);
+      group.appendChild(marker);
     }
   }
 
@@ -489,18 +642,19 @@ export class MapRenderer {
     const territory = this.territoriesById.get(territoryId);
     if (!territory) return;
     const [cx, cy] = territory.centroid;
+    const group = this.labelGroup(cx ?? 0, cy ?? 0);
     const label = document.createElementNS(SVG_NS, 'text');
     label.setAttribute('x', String(cx));
     label.setAttribute('y', String((cy ?? 0) + 0.55));
     label.setAttribute('text-anchor', 'middle');
     label.setAttribute('font-size', '0.5');
-    label.setAttribute('font-weight', '700');
+    label.setAttribute('font-weight', '600');
     label.setAttribute('fill', 'white');
-    label.setAttribute('stroke', 'black');
+    label.setAttribute('stroke', LABEL_OUTLINE);
     label.setAttribute('stroke-width', '0.05');
     label.setAttribute('paint-order', 'stroke');
     label.textContent = text;
-    this.markerLayer.appendChild(label);
+    group.appendChild(label);
   }
 
   /** One line per unit type actually present at this territory - icon + count (or
@@ -523,6 +677,7 @@ export class MapRenderer {
 
     const types = this.garrisonTypes(view);
     if (types.length === 0) return;
+    const group = this.labelGroup(cx, cy);
 
     const lineHeight = GARRISON_LINE_HEIGHT;
     const iconSize = 0.46;
@@ -549,27 +704,27 @@ export class MapRenderer {
       const scale = iconSize / 16;
       icon.setAttribute('transform', `translate(${cx - gap / 2 - iconSize}, ${y - iconSize / 2 - 0.13}) scale(${scale})`);
       icon.setAttribute('fill', 'white');
-      icon.setAttribute('stroke', 'black');
+      icon.setAttribute('stroke', LABEL_OUTLINE);
       icon.setAttribute('stroke-width', '1.4');
       icon.setAttribute('paint-order', 'stroke');
       icon.innerHTML = UNIT_ICON_PATHS[type];
-      this.markerLayer.appendChild(icon);
+      group.appendChild(icon);
 
       const label = document.createElementNS(SVG_NS, 'text');
       label.setAttribute('x', String(cx + gap / 2));
       label.setAttribute('y', String(y));
       label.setAttribute('text-anchor', 'start');
       label.setAttribute('font-size', '0.56');
-      label.setAttribute('font-weight', '700');
+      label.setAttribute('font-weight', '600');
       label.setAttribute('fill', OTHER_UNITS_COLOR);
-      label.setAttribute('stroke', 'black');
+      label.setAttribute('stroke', LABEL_OUTLINE);
       label.setAttribute('stroke-width', '0.055');
       label.setAttribute('paint-order', 'stroke');
       parts.forEach((part, index) => {
         if (index > 0) label.appendChild(this.labelSpan('/', OTHER_UNITS_COLOR));
         label.appendChild(this.labelSpan(part.text, part.fill));
       });
-      this.markerLayer.appendChild(label);
+      group.appendChild(label);
     });
   }
 
@@ -591,19 +746,20 @@ export class MapRenderer {
     const [rawCx, rawCy] = territory.centroid;
     const cx = rawCx ?? 0;
     const cy = rawCy ?? 0;
+    const group = this.labelGroup(cx, cy);
 
     const levelLabel = document.createElementNS(SVG_NS, 'text');
     levelLabel.setAttribute('x', String(cx));
     levelLabel.setAttribute('y', String(cy - 0.65));
     levelLabel.setAttribute('text-anchor', 'middle');
     levelLabel.setAttribute('font-size', '0.38');
-    levelLabel.setAttribute('font-weight', '700');
+    levelLabel.setAttribute('font-weight', '600');
     levelLabel.setAttribute('fill', '#facc15');
-    levelLabel.setAttribute('stroke', 'black');
+    levelLabel.setAttribute('stroke', LABEL_OUTLINE);
     levelLabel.setAttribute('stroke-width', '0.05');
     levelLabel.setAttribute('paint-order', 'stroke');
     levelLabel.textContent = `✈ Lvl ${airfield.level}`;
-    this.markerLayer.appendChild(levelLabel);
+    group.appendChild(levelLabel);
 
     const types = AIRCRAFT_TYPES.filter((type) => airfield.aircraft[type] > 0);
     if (types.length === 0) return;
@@ -621,33 +777,31 @@ export class MapRenderer {
       const scale = iconSize / 16;
       icon.setAttribute('transform', `translate(${cx - gap / 2 - iconSize}, ${y - iconSize / 2 - 0.11}) scale(${scale})`);
       icon.setAttribute('fill', 'white');
-      icon.setAttribute('stroke', 'black');
+      icon.setAttribute('stroke', LABEL_OUTLINE);
       icon.setAttribute('stroke-width', '1.4');
       icon.setAttribute('paint-order', 'stroke');
       icon.innerHTML = AIRCRAFT_ICON_PATHS[type];
-      this.markerLayer.appendChild(icon);
+      group.appendChild(icon);
 
       const label = document.createElementNS(SVG_NS, 'text');
       label.setAttribute('x', String(cx + gap / 2));
       label.setAttribute('y', String(y));
       label.setAttribute('text-anchor', 'start');
       label.setAttribute('font-size', '0.46');
-      label.setAttribute('font-weight', '700');
+      label.setAttribute('font-weight', '600');
       label.setAttribute('fill', 'white');
-      label.setAttribute('stroke', 'black');
+      label.setAttribute('stroke', LABEL_OUTLINE);
       label.setAttribute('stroke-width', '0.048');
       label.setAttribute('paint-order', 'stroke');
       label.textContent = String(count);
-      this.markerLayer.appendChild(label);
+      group.appendChild(label);
     });
   }
 
   private onEnter(territory: Territory): void {
     this.hoveredId = territory.id;
-    const el = this.pathsById.get(territory.id);
-    el?.style.setProperty('stroke', RELATED_STROKE);
-    el?.style.setProperty('stroke-width', HOVERED_STROKE_WIDTH);
     this.setNeighborStroke(territory, true);
+    this.showCue(territory.id, RELATED_STROKE, HOVERED_STROKE_WIDTH);
     const state = this.currentGameState?.territoryState.get(territory.id);
     let garrisonText = '';
     if (state && this.currentGameState) {
@@ -686,9 +840,7 @@ export class MapRenderer {
     const territory = this.hoveredId ? this.territoriesById.get(this.hoveredId) : undefined;
     this.hoveredId = null;
     if (territory) {
-      const el = this.pathsById.get(territory.id);
-      el?.style.removeProperty('stroke');
-      el?.style.removeProperty('stroke-width');
+      this.hideCue(territory.id);
       this.setNeighborStroke(territory, false);
     }
     this.tooltip.classList.add('hidden');
@@ -696,15 +848,8 @@ export class MapRenderer {
 
   private setNeighborStroke(territory: Territory, on: boolean): void {
     for (const neighborId of territory.neighbors) {
-      const el = this.pathsById.get(neighborId);
-      if (!el) continue;
-      if (on) {
-        el.style.setProperty('stroke', RELATED_STROKE);
-        el.style.setProperty('stroke-width', RELATED_STROKE_WIDTH);
-      } else {
-        el.style.removeProperty('stroke');
-        el.style.removeProperty('stroke-width');
-      }
+      if (on) this.showCue(neighborId, RELATED_STROKE, RELATED_STROKE_WIDTH);
+      else this.hideCue(neighborId);
     }
   }
 
@@ -772,7 +917,7 @@ export class MapRenderer {
       this.dragLine.setAttribute('stroke-width', '0.12');
       this.dragLine.setAttribute('vector-effect', 'non-scaling-stroke');
       this.dragLine.classList.add('pointer-events-none');
-      this.svg.appendChild(this.dragLine);
+      this.topSvg.appendChild(this.dragLine);
     }
     this.dragLine.setAttribute('x1', String(sourceCentroid[0] ?? 0));
     this.dragLine.setAttribute('y1', String(sourceCentroid[1] ?? 0));

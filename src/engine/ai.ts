@@ -58,6 +58,7 @@ import {
   AIRFIELD_BUILD_COST,
   AIRFIELD_UPGRADE_COST,
   FIGHTER_RANGE,
+  CAS_STRIKE_DAMAGE_PER_UNIT,
 } from './airforce';
 import type { BomberRaidMode } from './airforce';
 
@@ -1267,11 +1268,138 @@ export function aiWantsDraw(pending: PendingBattle): boolean {
   return battleStrength(attacker) <= battleStrength(defender);
 }
 
+/** Kein einziger Soldat - Ausgangspunkt für die Summen der Kampfeinschätzung. */
+const NO_UNITS: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 };
+
+/** Wie sich der Kampf aus Sicht des Angreifers entwickeln kann - siehe battleOutlook. */
+interface BattleOutlook {
+  /** Der Angreifer könnte unter günstigen Annahmen noch gewinnen (eigene Artillerie und Luftunterstützung treffen, Städte
+   *  und Truppen liegen erreichbar) - nur wenn selbst das nicht reicht, ist er chancenlos. */
+  readonly attackerMayWin: boolean;
+  /** Der Angreifer gewinnt auch unter ungünstigen Annahmen (die Artillerie und Luftunterstützung des Verteidigers dezimiert ihn,
+   *  seine eigene trifft nicht) - nur dann ist der Verteidiger verloren. */
+  readonly attackerSurelyWins: boolean;
+}
+
+/** Ein Feld angreifen kostet so viel Stärke, wie es verteidigt (der Verteidiger zählt dort 1,5-fach, siehe combat.ts's
+ *  defenseStrength) - hier für eine reine Stärkezahl. */
+function costToBreak(strength: number): number {
+  return defenseStrength({ ...NO_UNITS, infantry: Math.max(0, strength) });
+}
+
+/** Wie viele Züge der Angreifer noch hat, bevor die Uhr abläuft und der Verteidiger gewinnt (siehe combat.ts's
+ *  MAX_BATTLE_ROUNDS; in jeder Runde zieht der Angreifer nach dem Verteidiger). */
+function attackerTurnsLeft(pending: PendingBattle): number {
+  return Math.max(0, MAX_BATTLE_ROUNDS - pending.battleRound + 1);
+}
+
+/** CAS-Schläge, die eine Seite noch ausführen kann (unterwegs oder bereit) - je Flugzeug-Einheit ein Schlag mit
+ *  CAS_STRIKE_DAMAGE_PER_UNIT Stärke Schaden. */
+function pendingCasDamage(pending: PendingBattle, side: 'attacker' | 'defender'): number {
+  let damage = 0;
+  for (const aircraft of pending.calledAircraft) {
+    if (aircraft.side === side && aircraft.type === 'cas' && (aircraft.status === 'incoming' || aircraft.status === 'ready')) {
+      damage += aircraft.count * CAS_STRIKE_DAMAGE_PER_UNIT;
+    }
+  }
+  return damage;
+}
+
+/** Wie viele Kampfzüge der Angreifer mindestens braucht, um jedes der Felder `targets` zu erreichen - der Weg zum entferntesten,
+ *  in Luftlinie auf dem Raster (Hindernisse und Tempo außer Acht gelassen, also eine Untergrenze). Unendlich, wenn er gar keine
+ *  Truppen mehr hat. */
+function turnsToReach(pending: PendingBattle, targets: readonly BattleSubTerritory[]): number {
+  const subState = pending.subState;
+  if (!subState) return Number.POSITIVE_INFINITY;
+  const starts = pending.subTerritories.filter((t) => {
+    const cell = subState.get(t.id);
+    return cell?.ownerId === pending.attackerId && totalUnits(cell.garrison) > 0;
+  });
+  if (starts.length === 0) return Number.POSITIVE_INFINITY;
+  let farthest = 0;
+  for (const target of targets) {
+    farthest = Math.max(farthest, Math.min(...starts.map((start) => subTerritoryDistance(start, target))));
+  }
+  return farthest;
+}
+
 /**
- * Das Unentschieden-Verhalten der KI-Seite `aiId` in einem laufenden Kampf: nimmt ein Angebot des Gegners an, wenn
- * aiWantsDraw gilt; bietet von sich aus eins an (`mayOffer`), wenn aiWantsDraw gilt und der Kampf mindestens
- * AI_DRAW_OFFER_MIN_ROUND Runden läuft. Nutzt dieselbe Engine-Aktion wie der Button der Menschen (proposeBattleDraw).
- * `concluded` ist gesetzt, wenn dadurch (beidseitige Zustimmung) die Schlacht endete.
+ * Grobe Prognose des Kampfausgangs, nur aus dem Schlachtfeld selbst (Stärke, Feld-Verteidigungsbonus, Artillerie,
+ * Luftunterstützung, Städte, Restzeit): Der Angreifer gewinnt, indem er den Verteidiger vernichtet oder alle 6 Städte hält,
+ * bevor die Uhr abläuft; sonst gewinnt der Verteidiger. Jedes Feld, das er stürmt, kostet ihn die 1,5-fache Stärke der
+ * Besatzung (costToBreak) - ohne Übermacht kommt er also nicht durch. Zwei bewusst gegensätzliche Annahmen, damit die KI nur
+ * dann aufgibt, wenn die Lage eindeutig ist (siehe BattleOutlook):
+ * - günstig für den Angreifer: eigene Artillerie/CAS treffen, feindliche nicht; Städte, die gerade schwach besetzt sind, zählen als
+ *   erreichbar (der Verteidiger könnte sie zwar noch verstärken, muss es aber nicht);
+ * - ungünstig für ihn: feindliche Artillerie/CAS dezimiert ihn, seine eigene trifft nicht, der Verteidiger verschanzt sich
+ *   mit allem, was er hat, und der Angreifer braucht Reserve in der Zeit.
+ */
+function battleOutlook(pending: PendingBattle): BattleOutlook {
+  const subState = pending.subState;
+  if (!subState) return { attackerMayWin: true, attackerSurelyWins: false }; // noch keine Kampfphase: keine Aussage
+  const attacker = unitsOnBattlefield(pending, pending.attackerId);
+  const defender = unitsOnBattlefield(pending, pending.defenderId);
+  const turns = attackerTurnsLeft(pending);
+  if (turns === 0 || totalUnits(attacker) === 0) return { attackerMayWin: false, attackerSurelyWins: false };
+
+  const attackerStrength = battleStrength(attacker);
+  const defenderStrength = battleStrength(defender);
+  // Feuer auf Distanz über die restliche Zeit: Artillerie tötet je Zug höchstens eine Infanterie pro Geschütz, ein CAS-Schlag
+  // wirft Stärke ab.
+  const attackerFire = Math.min(defender.infantry, attacker.artillery * turns) + pendingCasDamage(pending, 'attacker');
+  const defenderFire = Math.min(attacker.infantry, defender.artillery * turns) + pendingCasDamage(pending, 'defender');
+
+  // Günstig für den Angreifer.
+  const citiesToTake = pending.subTerritories.filter((t) => t.isCity && subState.get(t.id)?.ownerId !== pending.attackerId);
+  let cityCost = 0;
+  for (const city of citiesToTake) {
+    const cell = subState.get(city.id);
+    if (cell && cell.ownerId === pending.defenderId) cityCost += defenseStrength(cell.garrison);
+  }
+  const cityCostAfterFire = Math.max(0, cityCost - defenseStrength({ ...NO_UNITS, infantry: attackerFire }));
+  const defendersLeft = pending.subTerritories.filter((t) => {
+    const cell = subState.get(t.id);
+    return cell?.ownerId === pending.defenderId && totalUnits(cell.garrison) > 0;
+  });
+  const citiesInTime = turns >= turnsToReach(pending, citiesToTake);
+  const defendersInTime = turns >= turnsToReach(pending, defendersLeft);
+  const wipeCost = costToBreak(Math.max(0, defenderStrength - attackerFire));
+  // Reine Artillerie kann eine Truppe aus lauter Infanterie ganz allein aufreiben.
+  const infantryOnly = defender.lightTank + defender.heavyTank + defender.motorizedInfantry + defender.artillery === 0;
+  const artilleryWipes = attacker.artillery > 0 && infantryOnly && attacker.artillery * turns >= defender.infantry;
+  const attackerMayWin =
+    artilleryWipes ||
+    (citiesInTime && attackerStrength > cityCostAfterFire) ||
+    (defendersInTime && attackerStrength > wipeCost);
+
+  // Ungünstig für den Angreifer: er muss alles brechen, was der Verteidiger hat, und dafür genug Zeit haben.
+  const attackerLeft = Math.max(0, attackerStrength - defenderFire);
+  const attackerSurelyWins = attackerLeft > costToBreak(defenderStrength) && turns >= turnsToReach(pending, defendersLeft) + 2;
+
+  return { attackerMayWin, attackerSurelyWins };
+}
+
+/**
+ * Kann die KI-Seite `aiId` den Kampf noch gewinnen? Bewusst vorsichtig - "kann nicht mehr gewinnen" heißt hier: unter den
+ * für sie günstigsten Annahmen bleibt kein Weg zum Sieg (siehe battleOutlook):
+ * - Als Angreifer ist sie chancenlos, wenn sie weder die Verteidigung brechen noch die Städte einnehmen kann (Feld-Bonus, Zeit
+ *   und Feuer auf Distanz eingerechnet) - nicht schon, wenn sie nur etwas schwächer aussieht.
+ * - Als Verteidiger ist sie verloren, wenn der Angreifer sie auch im ungünstigsten Fall überrollt; solange er sie nicht sicher
+ *   überrollt, gewinnt sie mindestens die Uhr.
+ */
+export function aiCanStillWin(pending: PendingBattle, aiId: string): boolean {
+  const outlook = battleOutlook(pending);
+  return pending.attackerId === aiId ? outlook.attackerMayWin : !outlook.attackerSurelyWins;
+}
+
+/**
+ * Das Unentschieden-Verhalten der KI-Seite `aiId` in einem laufenden Kampf.
+ * Annehmen (ein Angebot des Gegners liegt vor): wenn aiWantsDraw gilt (der Angreifer kommt gegen den Verteidiger nicht mehr an)
+ * ODER die KI den Kampf nicht mehr gewinnen kann (aiCanStillWin) - ein Unentschieden ist dann besser als die Niederlage.
+ * Anbieten (`mayOffer`): wie bisher nur, wenn aiWantsDraw gilt und der Kampf mindestens AI_DRAW_OFFER_MIN_ROUND Runden läuft.
+ * Ein noch offenes Angebot des Gegners prüft die KI zu Beginn jedes eigenen Kampfzugs erneut (cascadeAiBattleTurns), sie nimmt es
+ * also auch dann noch an, wenn sich ihre Lage erst später aussichtslos entwickelt. Nutzt dieselbe Engine-Aktion wie der Button der
+ * Menschen (proposeBattleDraw). `concluded` ist gesetzt, wenn dadurch (beidseitige Zustimmung) die Schlacht endete.
  */
 export function aiHandleDraw(
   gameState: GameState,
@@ -1279,13 +1407,15 @@ export function aiHandleDraw(
   mayOffer: boolean,
 ): { readonly gameState: GameState; readonly concluded: BattleResult | null } {
   const pending = gameState.pendingBattle;
-  if (!pending?.subState || !aiWantsDraw(pending)) return { gameState, concluded: null };
+  if (!pending?.subState) return { gameState, concluded: null };
   const isAttacker = pending.attackerId === aiId;
   if (!isAttacker && pending.defenderId !== aiId) return { gameState, concluded: null };
   const alreadyOffered = isAttacker ? pending.attackerDrawOffer : pending.defenderDrawOffer;
   const opponentOffered = isAttacker ? pending.defenderDrawOffer : pending.attackerDrawOffer;
   if (alreadyOffered) return { gameState, concluded: null };
-  if (!opponentOffered && !(mayOffer && pending.battleRound >= AI_DRAW_OFFER_MIN_ROUND)) return { gameState, concluded: null };
+  const accept = !!opponentOffered && (aiWantsDraw(pending) || !aiCanStillWin(pending, aiId));
+  const offer = !opponentOffered && mayOffer && pending.battleRound >= AI_DRAW_OFFER_MIN_ROUND && aiWantsDraw(pending);
+  if (!accept && !offer) return { gameState, concluded: null };
   const out = proposeBattleDraw(gameState, aiId);
   return out.ok ? { gameState: out.gameState, concluded: out.concluded } : { gameState, concluded: null };
 }

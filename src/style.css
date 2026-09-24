@@ -1,70 +1,153 @@
 @import "tailwindcss";
+@import "@fontsource/big-shoulders-display/latin-700";
+@import "@fontsource/big-shoulders-display/latin-800";
+@import "@fontsource/big-shoulders-stencil-display/latin-800";
+@import "@fontsource/ibm-plex-sans/latin-400";
+@import "@fontsource/ibm-plex-sans/latin-500";
+@import "@fontsource/ibm-plex-sans/latin-600";
+@import "@fontsource/ibm-plex-mono/latin-500";
+@import "@fontsource/ibm-plex-mono/latin-600";
 
-/* Default (light) theme: white surfaces with a black accent. Implemented by remapping the
- * slate and amber scales themselves, mirrored around their midpoint, rather than touching
- * every bg-slate and text-slate call site - the app already consistently pairs a dark tone
- * for a surface or border with a light tone for the text or foreground on it, so mirroring the
- * scale flips that pairing into light surface, dark text for free. amber (the app's one accent
- * color, used for primary buttons and highlights) is remapped to a black-to-white monochrome
- * ramp instead of orange, with amber-500 (the most-used stop) landing on pure black. */
+/* Look: a field map / war-room table rather than a web-app template - warm map paper and printed ink instead of cool
+ * grey, nearly square corners, ruled double frames, a condensed industrial display face for anything that is a label or
+ * a command, tabular mono for numbers, and exactly one loud color (signal red).
+ *
+ * Default (light) theme: paper surfaces with ink accents. Implemented by remapping the slate and amber scales themselves,
+ * mirrored around their midpoint, rather than touching every bg-slate and text-slate call site - the app already
+ * consistently pairs a dark tone for a surface or border with a light tone for the text or foreground on it, so mirroring
+ * the scale flips that pairing into light surface, dark text for free. amber (the app's one accent scale, used for primary
+ * buttons and highlights) is remapped to an ink-to-paper monochrome ramp instead of orange, with amber-500 (the most-used
+ * stop) landing on ink. `signal` is the separate loud accent (end turn, active markers, the logo's front line). */
 @theme {
-  --color-slate-50: #020617;
-  --color-slate-100: #0f172a;
-  --color-slate-200: #1e293b;
-  --color-slate-300: #334155;
-  --color-slate-400: #475569;
-  --color-slate-500: #64748b;
-  --color-slate-600: #94a3b8;
-  --color-slate-700: #cbd5e1;
-  --color-slate-800: #e2e8f0;
-  --color-slate-900: #f1f5f9;
-  --color-slate-950: #f8fafc;
+  --font-sans: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  --font-display: 'Big Shoulders Display', 'Bahnschrift', 'Arial Narrow', sans-serif;
+  --font-stencil: 'Big Shoulders Stencil Display', 'Big Shoulders Display', 'Bahnschrift', 'Arial Narrow', sans-serif;
 
-  --color-amber-50: #0a0a0a;
-  --color-amber-100: #171717;
-  --color-amber-200: #262626;
-  --color-amber-300: #404040;
-  --color-amber-400: #525252;
-  --color-amber-500: #000000;
-  --color-amber-600: #737373;
-  --color-amber-700: #a3a3a3;
-  --color-amber-800: #d4d4d4;
-  --color-amber-900: #e5e5e5;
-  --color-amber-950: #fafafa;
+  /* Nearly square: everything that says rounded-md/lg/xl stays a hair softer than a hard rectangle, never a pill or card. */
+  --radius-xs: 0;
+  --radius-sm: 1px;
+  --radius-md: 2px;
+  --radius-lg: 3px;
+  --radius-xl: 4px;
+  --radius-2xl: 6px;
+
+  /* Printed, not floating: offset shadows instead of blurred ones. */
+  --shadow-sm: 1px 1px 0 0 rgb(0 0 0 / 0.25);
+  --shadow-md: 2px 2px 0 0 rgb(0 0 0 / 0.28);
+  --shadow-lg: 4px 4px 0 0 rgb(0 0 0 / 0.3);
+
+  --color-signal: #b3311c;
+
+  /* Map sea: a printed wash, not a screen blue - `sea` is the normal wash, `sea-strong` the emphasised one of the Marine tab,
+   * `sea-line` the coastal water-lining and zone borders, `sea-ink` the lettering. */
+  --color-sea: #cdd9d6;
+  --color-sea-strong: #9fc2cd;
+  --color-sea-line: #a3b8b8;
+  --color-sea-ink: #40666f;
+
+  --color-slate-50: #0e0d0a;
+  --color-slate-100: #1c1b16;
+  --color-slate-200: #2c2a22;
+  --color-slate-300: #423f33;
+  --color-slate-400: #59533f;
+  --color-slate-500: #6f6753;
+  --color-slate-600: #9a917a;
+  --color-slate-700: #b7ad8f;
+  --color-slate-800: #e5decb;
+  --color-slate-900: #f0ebdc;
+  --color-slate-950: #f8f5ea;
+
+  --color-amber-50: #0e0d0a;
+  --color-amber-100: #1c1b16;
+  --color-amber-200: #2c2a22;
+  --color-amber-300: #423f33;
+  --color-amber-400: #59533f;
+  --color-amber-500: #1c1b16;
+  --color-amber-600: #857e66;
+  --color-amber-700: #b0a688;
+  --color-amber-800: #d3ccb0;
+  --color-amber-900: #e5decb;
+  --color-amber-950: #f4f0e2;
 }
 
-/* Dark theme: the exact photographic negative of the above (black surfaces, white accent) -
- * toggled by adding `dark` to <html>. Plain (unlayered) rules beat the @theme block's own
- * `@layer theme` output regardless of source order, so this reliably overrides it for any
- * element under `.dark`. Uses Tailwind's neutral scale (true achromatic gray) rather than slate's
- * own blue-tinted hexes, since the request was a black-and-grey background, not a bluish one -
- * only the variable names stay slate-flavored (that's what the generated bg-slate and text-slate
- * utilities reference), the actual values underneath are neutral. */
+/* Dark theme ("Nachtlage"): the negative of the above - dark khaki-black surfaces, cream ink - toggled by adding `dark` to
+ * <html>. Plain (unlayered) rules beat the @theme block's own `@layer theme` output regardless of source order, so this
+ * reliably overrides it for any element under `.dark`. Only the variable names stay slate-flavored (that's what the
+ * generated bg-slate and text-slate utilities reference), the actual values underneath are warm neutrals. */
 .dark {
-  --color-slate-50: #fafafa;
-  --color-slate-100: #f5f5f5;
-  --color-slate-200: #e5e5e5;
-  --color-slate-300: #d4d4d4;
-  --color-slate-400: #a3a3a3;
-  --color-slate-500: #737373;
-  --color-slate-600: #525252;
-  --color-slate-700: #404040;
-  --color-slate-800: #262626;
-  --color-slate-900: #171717;
-  --color-slate-950: #0a0a0a;
+  --color-signal: #e2573e;
 
-  --color-amber-50: #fafafa;
-  --color-amber-100: #e5e5e5;
-  --color-amber-200: #d4d4d4;
-  --color-amber-300: #a3a3a3;
-  --color-amber-400: #737373;
-  --color-amber-500: #ffffff;
-  --color-amber-600: #525252;
-  --color-amber-700: #404040;
-  --color-amber-800: #262626;
-  --color-amber-900: #171717;
-  --color-amber-950: #0a0a0a;
+  --color-sea: #1b2b2f;
+  --color-sea-strong: #245262;
+  --color-sea-line: #34505a;
+  --color-sea-ink: #86aab4;
+
+  --color-slate-50: #faf7ec;
+  --color-slate-100: #efeada;
+  --color-slate-200: #dcd6c0;
+  --color-slate-300: #c2bba1;
+  --color-slate-400: #a39c83;
+  --color-slate-500: #857e67;
+  --color-slate-600: #5c5744;
+  --color-slate-700: #3b382b;
+  --color-slate-800: #26241c;
+  --color-slate-900: #191812;
+  --color-slate-950: #100f0b;
+
+  --color-amber-50: #faf7ec;
+  --color-amber-100: #efeada;
+  --color-amber-200: #dcd6c0;
+  --color-amber-300: #c2bba1;
+  --color-amber-400: #a39c83;
+  --color-amber-500: #efeada;
+  --color-amber-600: #5c5744;
+  --color-amber-700: #3b382b;
+  --color-amber-800: #26241c;
+  --color-amber-900: #191812;
+  --color-amber-950: #100f0b;
 }
+
+@layer base {
+  html { color-scheme: light; }
+  html.dark { color-scheme: dark; }
+
+  /* A faint graticule behind everything, like the grid on a plotting map - quiet enough to disappear behind any panel. */
+  body {
+    background-image:
+      linear-gradient(to right, color-mix(in oklab, var(--color-slate-600) 13%, transparent) 1px, transparent 1px),
+      linear-gradient(to bottom, color-mix(in oklab, var(--color-slate-600) 13%, transparent) 1px, transparent 1px);
+    background-size: 40px 40px;
+    /* Bewusst nicht `fixed`: ein fixiertes Hintergrundbild zwingt Chrome bei jeder scrollbaren Seite zum Scrollen im Hauptthread. */
+  }
+
+  /* Tailwind's preflight resets buttons to the default cursor. */
+  button:not(:disabled), [role="button"]:not([aria-disabled="true"]), select:not(:disabled) { cursor: pointer; }
+
+  :focus-visible { outline: 2px solid var(--color-signal); outline-offset: 2px; }
+  ::selection { background: var(--color-signal); color: #fff; }
+
+  dialog { color: inherit; }
+  dialog::backdrop { background: rgb(20 18 12 / 0.62); }
+}
+
+/* Ruled double frame - the printed-certificate / map-legend border used for cards, the help sheet and the situation report:
+ * a thin outer rule, a paper gap, a thin inner rule. */
+@utility frame {
+  border: 1px solid var(--color-slate-500);
+  box-shadow: inset 0 0 0 3px var(--color-slate-800), inset 0 0 0 4px var(--color-slate-600);
+}
+
+/* Label type: condensed, uppercase, spaced - section headings, tabs and commands. */
+@utility label-caps {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* Startbildschirm: das große Logo ersetzt das kleine der Kopfzeile (unsichtbar statt entfernt, damit die Kopfzeile nicht springt). */
+.title-screen .header-logo { visibility: hidden; }
 
 /* Karten-Tabs (GameScreen.syncLayout): Ab dem lg-Breakpoint füllt die Spielansicht genau die Fensterhöhe (`map-lock` auf
  * <html>) und die Karte wird im restlichen Platz in voller Größe zentriert - sie ist so nie angeschnitten, ohne zu scrollen.
@@ -77,5 +160,6 @@
   .map-lock .lock-row { flex: 1 1 0%; min-height: 0; }
   .map-lock .map-shell { max-width: none; }
   .map-lock .map-fit-area { display: flex; align-items: center; justify-content: center; container-type: size; }
-  .map-lock .map-fit { width: min(100cqw, calc(100cqh * var(--map-ratio))); }
+  /* Die Karte sitzt in einem Rahmen (2x 1px Rand + 2x 7px Innenabstand = 16px, siehe MapRenderer's wrap), der in der Höhe mitzählt. */
+  .map-lock .map-fit { width: min(100cqw, calc((100cqh - 16px) * var(--map-ratio) + 16px)); }
 }

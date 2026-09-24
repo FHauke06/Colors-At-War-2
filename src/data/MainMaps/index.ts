@@ -24,8 +24,9 @@ type LandOnlyMap = Omit<TerritoryData, 'seaZones'>;
  * importing a specific map's JSON directly.
  */
 export const MAIN_MAPS: readonly MainMapEntry[] = [
-  { id: 'europe', name: 'Europa', data: { ...(europe as LandOnlyMap), seaZones: EUROPE_SEA_ZONES } },
-  { id: 'asia', name: 'Asien', data: { ...(asia as LandOnlyMap), seaZones: ASIA_SEA_ZONES } },
+  // lonScale: cos(54°), die Bezugsbreite von scripts/generate-territories.mjs; die Asienkarte ist unverzerrt (Länge = x).
+  { id: 'europe', name: 'Europa', data: { ...(europe as LandOnlyMap), seaZones: EUROPE_SEA_ZONES, lonScale: 0.5878 } },
+  { id: 'asia', name: 'Asien', data: { ...(asia as LandOnlyMap), seaZones: ASIA_SEA_ZONES, lonScale: 1 } },
 ];
 
 export const DEFAULT_MAIN_MAP_ID = 'europe';

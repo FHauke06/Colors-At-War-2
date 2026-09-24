@@ -10,14 +10,10 @@ import { RemoteGameClient, resolveWsUrl } from '../net/RemoteGameClient';
 import { MAIN_MAPS, DEFAULT_MAIN_MAP_ID, mainMapById } from '../data/MainMaps';
 import { SCENARIOS, scenarioById } from '../data/Scenarios';
 import type { Scenario } from '../data/Scenarios';
-
-const inputClass =
-  'rounded-md border border-slate-600 bg-slate-800 px-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-amber-400 focus:outline-none';
-const primaryBtnClass =
-  'rounded-md bg-amber-500 px-4 py-1.5 text-sm font-semibold text-slate-900 hover:bg-amber-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-500';
-const secondaryBtnClass =
-  'rounded-md border border-slate-600 bg-slate-800 px-4 py-1.5 text-sm font-semibold text-slate-100 hover:bg-slate-700';
-const cardClass = 'rounded-lg border border-slate-700 bg-slate-800/60 p-6';
+import { buildLogo } from './logo';
+import { uiIcon } from './uiIcons';
+import type { UiIconName } from './uiIcons';
+import { cardClass, inputClass, primaryBtnClass, secondaryBtnClass } from './styles';
 
 const DIFFICULTY_LABELS: Record<AiDifficulty, string> = {
   easy: 'Einfach',
@@ -67,150 +63,72 @@ export class SetupScreen {
   private clear(): void {
     this.destroy();
     this.map = null;
+    document.documentElement.classList.remove('title-screen');
+    this.root.className = 'mx-auto max-w-2xl';
     this.root.replaceChildren();
   }
 
-  // --- step 1: offline vs online ---
+  // --- step 1: title screen - offline vs online vs scenario ---
   private renderModeSelect(): void {
     this.clear();
-    const card = document.createElement('div');
-    card.className = `${cardClass} flex flex-col items-center gap-4 text-center`;
+    // Das große Logo ersetzt hier das der Kopfzeile (siehe style.css, `title-screen`); jeder andere Schritt räumt die Klasse in clear() wieder ab.
+    document.documentElement.classList.add('title-screen');
+    // Vertikal mittig im Fenster (abzüglich Kopfzeile und Rand).
+    this.root.className = 'mx-auto flex min-h-[calc(100dvh-9rem)] max-w-3xl flex-col justify-center';
 
-    const title = document.createElement('h2');
-    title.textContent = 'Wie möchtest du spielen?';
-    title.className = 'text-lg font-semibold';
+    const hero = document.createElement('div');
+    hero.className = 'mb-8 mt-2 flex flex-col items-center gap-3 text-center';
+    const logo = buildLogo('lg');
+    const tagline = document.createElement('p');
+    tagline.className = 'font-mono text-xs font-medium uppercase tracking-[0.2em] text-slate-500';
+    tagline.textContent = `Rundenstrategie · ${MAIN_MAPS.map((m) => m.name).join(' · ')}`;
+    hero.append(logo, tagline);
 
-    const row = document.createElement('div');
-    row.className = 'flex gap-3';
+    const modes: readonly { readonly icon: UiIconName; readonly title: string; readonly text: string; readonly go: () => void }[] = [
+      {
+        icon: 'computer',
+        title: 'Gegen den Computer',
+        text: `Allein gegen KI-Fraktionen - auf freier Karte mit eigener Hauptstadt oder in einem der ${SCENARIOS.length} historischen Szenarien (${SCENARIOS.map((sc) => sc.name.split(' – ')[0]).join(', ')}).`,
+        go: () => this.renderOfflineConfig(),
+      },
+      {
+        icon: 'network',
+        title: 'Mit Freunden',
+        text: 'Session erstellen oder per Code beitreten - ebenfalls auf freier Karte oder mit einem Szenario. Der Host kann freie Plätze mit KI füllen.',
+        go: () => this.renderOnlineChoice(),
+      },
+    ];
 
-    const offlineBtn = document.createElement('button');
-    offlineBtn.type = 'button';
-    offlineBtn.textContent = 'Offline (gegen Computer)';
-    offlineBtn.className = primaryBtnClass;
-    offlineBtn.addEventListener('click', () => this.renderOfflineConfig());
-
-    const onlineBtn = document.createElement('button');
-    onlineBtn.type = 'button';
-    onlineBtn.textContent = 'Online (mit Freunden)';
-    onlineBtn.className = secondaryBtnClass;
-    onlineBtn.addEventListener('click', () => this.renderOnlineChoice());
-
-    const scenarioBtn = document.createElement('button');
-    scenarioBtn.type = 'button';
-    scenarioBtn.textContent = 'Szenario spielen';
-    scenarioBtn.className = secondaryBtnClass;
-    scenarioBtn.addEventListener('click', () => this.renderScenarioSelect());
-
-    row.append(offlineBtn, onlineBtn, scenarioBtn);
-    card.append(title, row);
-    this.root.appendChild(card);
-  }
-
-  // --- scenario step 1: pick a scenario ---
-  private renderScenarioSelect(): void {
-    this.clear();
-    const card = document.createElement('div');
-    card.className = `${cardClass} flex flex-col gap-4`;
-
-    const title = document.createElement('h2');
-    title.textContent = 'Szenario wählen';
-    title.className = 'text-lg font-semibold';
-
-    const list = document.createElement('div');
-    list.className = 'flex flex-col gap-2';
-    for (const scenario of SCENARIOS) {
-      const mapName = MAIN_MAPS.find((m) => m.id === scenario.mapId)?.name ?? scenario.mapId;
-
-      const entry = document.createElement('button');
-      entry.type = 'button';
-      entry.className = `${cardClass} text-left hover:border-amber-400`;
-      const entryTitle = document.createElement('div');
-      entryTitle.className = 'font-semibold';
-      entryTitle.textContent = `${scenario.name} (${mapName})`;
-      const entryDesc = document.createElement('div');
-      entryDesc.className = 'text-sm text-slate-400';
-      entryDesc.textContent = scenario.description;
-      entry.append(entryTitle, entryDesc);
-      entry.addEventListener('click', () => this.renderScenarioConfig(scenario));
-      list.appendChild(entry);
-    }
-
-    card.append(title, list, this.backRow());
-    this.root.appendChild(card);
-  }
-
-  // --- scenario step 2: pick your faction + AI difficulty, then start immediately ---
-  private renderScenarioConfig(scenario: Scenario): void {
-    this.clear();
-    let humanFactionIndex = 0;
-    let aiDifficulty: AiDifficulty = 'medium';
-
-    const card = document.createElement('div');
-    card.className = `${cardClass} flex flex-col gap-4`;
-
-    const title = document.createElement('h2');
-    title.textContent = scenario.name;
-    title.className = 'text-lg font-semibold';
-
-    const desc = document.createElement('p');
-    desc.className = 'text-sm text-slate-400';
-    desc.textContent = scenario.description;
-
-    const nameInput = document.createElement('input');
-    nameInput.type = 'text';
-    nameInput.placeholder = 'Dein Name';
-    nameInput.maxLength = 24;
-    nameInput.className = inputClass;
-
-    const factionWrap = document.createElement('div');
-    factionWrap.className = 'flex flex-col gap-1.5';
-    const factionLabel = document.createElement('span');
-    factionLabel.textContent = 'Deine Fraktion:';
-    factionLabel.className = 'text-sm text-slate-300';
-    const factionSelect = document.createElement('select');
-    factionSelect.className = inputClass;
-    scenario.factions.forEach((faction, i) => {
-      const option = document.createElement('option');
-      option.value = String(i);
-      option.textContent = faction.name;
-      factionSelect.appendChild(option);
-    });
-    factionSelect.addEventListener('change', () => {
-      humanFactionIndex = Number(factionSelect.value);
-    });
-    factionWrap.append(factionLabel, factionSelect);
-
-    const errorBanner = document.createElement('div');
-    errorBanner.className = 'hidden rounded-md border border-red-700 bg-red-950 px-3 py-2 text-sm text-red-200';
-
-    const startBtn = document.createElement('button');
-    startBtn.type = 'button';
-    startBtn.textContent = 'Spiel starten';
-    startBtn.className = primaryBtnClass;
-    startBtn.addEventListener('click', () => {
-      const name = nameInput.value.trim() || 'Spieler 1';
-      this.setMap(scenario.mapId);
-      const client = LocalGameClient.fromScenario(scenario, humanFactionIndex, name, aiDifficulty);
-      this.client = client;
-      this.unsubscribers.push(client.onError((message) => {
-        errorBanner.textContent = message;
-        errorBanner.classList.remove('hidden');
-      }));
-      this.unsubscribers.push(client.onGameStart((gameState) => this.onComplete(client, gameState, this.data)));
-      client.start();
+    const grid = document.createElement('div');
+    grid.className = 'grid gap-4 sm:grid-cols-2';
+    modes.forEach((mode, i) => {
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = `${cardClass} group flex flex-col items-start gap-3 text-left transition-colors hover:bg-slate-900`;
+      const top = document.createElement('div');
+      top.className = 'flex w-full items-start justify-between';
+      const badge = document.createElement('div');
+      badge.className = 'flex h-12 w-12 items-center justify-center rounded-md border border-slate-100 bg-amber-500 text-slate-900';
+      badge.appendChild(uiIcon(mode.icon, 26));
+      const index = document.createElement('span');
+      index.className = 'font-mono text-sm font-medium text-slate-500';
+      index.textContent = `0${i + 1}`;
+      top.append(badge, index);
+      const title = document.createElement('div');
+      title.className = 'label-caps text-2xl leading-none';
+      title.textContent = mode.title;
+      const text = document.createElement('p');
+      text.className = 'text-sm text-slate-400';
+      text.textContent = mode.text;
+      const go = document.createElement('div');
+      go.className = 'label-caps mt-auto flex items-center gap-2 pt-1 text-sm text-signal';
+      go.append(document.createTextNode('Auswählen'), uiIcon('endTurn', 12));
+      card.append(top, title, text, go);
+      card.addEventListener('click', mode.go);
+      grid.appendChild(card);
     });
 
-    card.append(
-      title,
-      desc,
-      nameInput,
-      factionWrap,
-      this.renderDifficultySelector(() => aiDifficulty, (d) => { aiDifficulty = d; }),
-      errorBanner,
-      this.backRow(() => this.renderScenarioSelect()),
-      startBtn,
-    );
-    this.root.appendChild(card);
+    this.root.append(hero, grid);
   }
 
   // --- step 2a: offline config ---
@@ -218,23 +136,32 @@ export class SetupScreen {
     this.clear();
     let factionCount = 4;
     let aiDifficulty: AiDifficulty = 'medium';
-    const { card, nameInput } = this.renderPlayerAndCountForm(
+    const { card, nameInput, countRow } = this.renderPlayerAndCountForm(
       'Gegen den Computer spielen',
       'Anzahl Fraktionen:',
       MIN_FACTIONS,
       () => factionCount,
       (n) => { factionCount = n; },
     );
-    card.appendChild(this.renderMapSelector());
-    card.appendChild(this.renderDifficultySelector(() => aiDifficulty, (d) => { aiDifficulty = d; }));
-
     const startBtn = document.createElement('button');
     startBtn.type = 'button';
-    startBtn.textContent = 'Weiter zur Hauptstadt-Wahl';
     startBtn.className = primaryBtnClass;
+    startBtn.textContent = 'Weiter zur Hauptstadt-Wahl';
+
+    // Wie beim Online-Host: ein Szenario bringt seine Karte und seine festen Fraktionen mit - die Anzahl der Fraktionen entfällt,
+    // und statt einer Hauptstadt wählt man in der Lobby eine Fraktion.
+    this.selectedScenarioId = null;
+    const mapSelector = this.renderMapSelector();
+    card.appendChild(this.renderScenarioSelector(mapSelector, (scenario) => {
+      countRow.classList.toggle('hidden', !!scenario);
+      startBtn.textContent = scenario ? 'Weiter zur Fraktions-Wahl' : 'Weiter zur Hauptstadt-Wahl';
+    }));
+    card.appendChild(mapSelector);
+    card.appendChild(this.renderDifficultySelector(() => aiDifficulty, (d) => { aiDifficulty = d; }));
+
     startBtn.addEventListener('click', () => {
       const name = nameInput.value.trim() || 'Spieler 1';
-      this.client = LocalGameClient.newLobby(this.selectedMapId, name, factionCount - 1, aiDifficulty);
+      this.client = LocalGameClient.newLobby(this.selectedMapId, name, factionCount - 1, aiDifficulty, this.selectedScenarioId ?? undefined);
       this.enterLobby();
     });
 
@@ -250,7 +177,7 @@ export class SetupScreen {
 
     const title = document.createElement('h2');
     title.textContent = 'Online spielen';
-    title.className = 'text-lg font-semibold';
+    title.className = 'label-caps text-2xl leading-none';
 
     const row = document.createElement('div');
     row.className = 'flex gap-3';
@@ -323,7 +250,7 @@ export class SetupScreen {
 
     const title = document.createElement('h2');
     title.textContent = 'Session beitreten';
-    title.className = 'text-lg font-semibold';
+    title.className = 'label-caps text-2xl leading-none';
 
     const nameInput = document.createElement('input');
     nameInput.type = 'text';
@@ -363,13 +290,13 @@ export class SetupScreen {
     minCount: number,
     getCount: () => number,
     setCount: (n: number) => void,
-  ): { card: HTMLDivElement; nameInput: HTMLInputElement; countLabel: HTMLSpanElement; bumpCount: (d: number) => void } {
+  ): { card: HTMLDivElement; nameInput: HTMLInputElement; countRow: HTMLDivElement; countLabel: HTMLSpanElement; bumpCount: (d: number) => void } {
     const card = document.createElement('div');
     card.className = `${cardClass} flex flex-col gap-4`;
 
     const title = document.createElement('h2');
     title.textContent = heading;
-    title.className = 'text-lg font-semibold';
+    title.className = 'label-caps text-2xl leading-none';
 
     const nameInput = document.createElement('input');
     nameInput.type = 'text';
@@ -394,18 +321,18 @@ export class SetupScreen {
     const minusBtn = document.createElement('button');
     minusBtn.type = 'button';
     minusBtn.textContent = '-';
-    minusBtn.className = 'h-8 w-8 rounded-md border border-slate-600 bg-slate-800 text-lg leading-none hover:bg-slate-700';
+    minusBtn.className = 'h-8 w-8 rounded-md border border-slate-500 bg-slate-800 text-lg leading-none hover:border-slate-100 hover:bg-slate-700';
     minusBtn.addEventListener('click', () => bumpCount(-1));
 
     const plusBtn = document.createElement('button');
     plusBtn.type = 'button';
     plusBtn.textContent = '+';
-    plusBtn.className = 'h-8 w-8 rounded-md border border-slate-600 bg-slate-800 text-lg leading-none hover:bg-slate-700';
+    plusBtn.className = 'h-8 w-8 rounded-md border border-slate-500 bg-slate-800 text-lg leading-none hover:border-slate-100 hover:bg-slate-700';
     plusBtn.addEventListener('click', () => bumpCount(1));
 
     countRow.append(countLabelEl, minusBtn, countLabel, plusBtn);
     card.append(title, nameInput, countRow);
-    return { card, nameInput, countLabel, bumpCount };
+    return { card, nameInput, countRow, countLabel, bumpCount };
   }
 
   /** "Hauptkarte" dropdown for data/MainMaps' MAIN_MAPS - shown once, alongside the offline
@@ -435,10 +362,11 @@ export class SetupScreen {
     return wrap;
   }
 
-  /** "Szenario" dropdown, analog zur Kartenauswahl (nur der Online-Host wählt; Joiner laden das Szenario anhand von
-   *  lobby.scenarioId lokal aus data/Scenarios). Ein Szenario bringt seine eigene Karte mit - die Kartenauswahl
-   *  (`mapSelector`) wird dann auf diese gesetzt und gesperrt. */
-  private renderScenarioSelector(mapSelector: HTMLDivElement): HTMLDivElement {
+  /** "Szenario" dropdown, analog zur Kartenauswahl - im Offline-Spiel wie beim Online-Host (Joiner laden das Szenario anhand
+   *  von lobby.scenarioId lokal aus data/Scenarios). Ein Szenario bringt seine eigene Karte mit - die Kartenauswahl
+   *  (`mapSelector`) wird dann auf diese gesetzt und gesperrt. `onChange` bekommt das gewählte Szenario (oder undefined für
+   *  "kein Szenario"), damit das jeweilige Formular seine übrigen Felder anpassen kann. */
+  private renderScenarioSelector(mapSelector: HTMLDivElement, onChange?: (scenario: Scenario | undefined) => void): HTMLDivElement {
     const wrap = document.createElement('div');
     wrap.className = 'flex flex-col gap-1.5';
     const label = document.createElement('span');
@@ -470,6 +398,7 @@ export class SetupScreen {
       }
       desc.textContent = scenario?.description ?? '';
       desc.classList.toggle('hidden', !scenario);
+      onChange?.(scenario);
     });
     wrap.append(label, select, desc);
     return wrap;
@@ -627,6 +556,7 @@ export class SetupScreen {
         dot.className = 'h-3 w-3 shrink-0 rounded-full';
         dot.style.background = faction.color;
         btn.append(dot, document.createTextNode(taker ? `${faction.name} — ${taker.name}` : faction.name));
+        btn.title = `${faction.territories.length} ${faction.territories.length === 1 ? 'Gebiet' : 'Gebiete'} · ${faction.resources} Rüstungspunkte`;
         btn.disabled = !!taker && taker.playerId !== client.playerId;
         btn.addEventListener('click', () => client.claimCapital(faction.capitalId));
         factionList.appendChild(btn);
@@ -639,9 +569,13 @@ export class SetupScreen {
           slot.playerId === client.playerId ? 'Du' : null,
         ].filter((s): s is string => s !== null)));
       }
-      for (const ai of shown.aiSlots) {
-        const onRemove = client.isOnline && host ? () => client.removeAi(ai.id) : undefined;
-        slotList.appendChild(this.renderSlotChip(ai.color, ai.name, ai.capitalId, [], onRemove));
+      // In einer Szenario-Lobby stehen die KI-Fraktionen schon in der Fraktionsliste darunter (mit Farbe, Namen und Vorschau auf der
+      // Karte) - als Chips oben wären sie nur eine zweite, sehr lange Liste derselben Angaben.
+      if (!scenario) {
+        for (const ai of shown.aiSlots) {
+          const onRemove = client.isOnline && host ? () => client.removeAi(ai.id) : undefined;
+          slotList.appendChild(this.renderSlotChip(ai.color, ai.name, ai.capitalId, [], onRemove));
+        }
       }
 
       difficultyLabel.classList.toggle('hidden', shown.aiSlots.length === 0);

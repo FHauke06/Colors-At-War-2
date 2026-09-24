@@ -28,6 +28,9 @@ export interface TerritoryData {
   /** Die Seezonen dieser Karte (Meer, in Wassergebiete eingeteilt) - Seekampf und Überseetransport
    *  laufen ausschließlich darüber, Landgebiete grenzen nicht mehr direkt über Wasser aneinander. */
   readonly seaZones: readonly SeaZone[];
+  /** Wie die Karte projiziert ist: x = Länge * lonScale, y = -Breite (siehe scripts/generate-territories.mjs) - nur damit
+   *  MapRenderer ein Gradnetz mit den richtigen Längen- und Breitenkreisen zeichnen kann. Fehlt es, gibt es kein Gradnetz. */
+  readonly lonScale?: number;
 }
 
 /**

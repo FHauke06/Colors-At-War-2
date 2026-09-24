@@ -1,4 +1,4 @@
-import type { AiDifficulty, AiSlot, GameState, LobbySlot, LobbyState, Player, ResearchState, Territory, TerritoryState, UnitComposition } from './types';
+import type { AiSlot, GameState, LobbyState, Player, ResearchState, Territory, TerritoryState, UnitComposition } from './types';
 import { MIN_FACTIONS } from './palette';
 import { emptyDiplomacyState, pairKey, propagateAllianceWars } from './diplomacy';
 import { fullResearchState } from './research';
@@ -31,7 +31,7 @@ export function pickCapitals(
 /** Turns a finished lobby (every human slot has a capital, AI seats already have theirs)
  *  into the game's initial state. */
 export function buildGameStateFromLobby(lobby: LobbyState, territories: readonly Territory[]): GameState {
-  // Szenario-Lobby (LobbyState.scenarioId): derselbe Weg wie beim Offline-Szenario - Startgebiete, Garnisonen,
+  // Szenario-Lobby (LobbyState.scenarioId, online wie offline): Startgebiete, Garnisonen,
   // Rüstungspunkte, Krieg/Pakte/Allianzen und researchState kommen aus dem Szenario (buildGameStateFromScenario).
   if (lobby.scenarioId) {
     const scenario = scenarioById(lobby.scenarioId);
@@ -128,38 +128,7 @@ export function finalizeScenarioLobby(lobby: LobbyState): LobbyState {
   return { ...lobby, slots, aiSlots };
 }
 
-/** Builds an already-fully-assigned LobbyState for a scenario (see data/Scenarios) - the human
- *  plays `scenario.factions[humanFactionIndex]`, every other faction becomes an AI seat. Every
- *  slot's capitalId is set straight from the scenario, so canStart() is true immediately - a
- *  scenario game skips the normal click-a-territory-to-claim-a-capital lobby step entirely (see
- *  ui/SetupScreen.ts's renderScenarioConfig). */
-export function lobbyFromScenario(
-  scenario: Scenario,
-  humanFactionIndex: number,
-  humanPlayerId: string,
-  humanName: string,
-  aiDifficulty: AiDifficulty,
-): LobbyState {
-  const human = scenario.factions[humanFactionIndex];
-  if (!human) throw new Error(`scenario "${scenario.id}" has no faction at index ${humanFactionIndex}`);
-
-  const slots: LobbySlot[] = [
-    { playerId: humanPlayerId, name: humanName, color: human.color, capitalId: human.capitalId, isHost: true },
-  ];
-  const aiSlots: AiSlot[] = scenario.factions
-    .map((faction, i) => ({ faction, i }))
-    .filter(({ i }) => i !== humanFactionIndex)
-    .map(({ faction, i }): AiSlot => ({
-      id: `scenario-ai-${i}`,
-      name: faction.name,
-      color: faction.color,
-      capitalId: faction.capitalId,
-    }));
-
-  return { code: 'SZENARIO', mapId: scenario.mapId, maxHumans: 1, slots, aiSlots, status: 'lobby', aiDifficulty };
-}
-
-/** Turns a scenario-derived lobby (see lobbyFromScenario) into its full pre-populated GameState:
+/** Turns a scenario lobby (see finalizeScenarioLobby) into its full pre-populated GameState:
  *  every territory the scenario lists gets that faction's exact garrison and every faction starts
  *  with its scenario-defined Rüstungspunkte, instead of the normal "one empty capital each with a
  *  flat starting garrison" (see buildGameStateFromLobby). Territories the scenario doesn't mention
@@ -168,7 +137,7 @@ export function lobbyFromScenario(
  *  when set. */
 export function buildGameStateFromScenario(scenario: Scenario, lobby: LobbyState, territories: readonly Territory[]): GameState {
   // Each lobby participant's capitalId came straight from a scenario faction (see
-  // lobbyFromScenario) and every faction's capitalId is unique, so this reliably maps back.
+  // finalizeScenarioLobby) and every faction's capitalId is unique, so this reliably maps back.
   const factionByCapital = new Map(scenario.factions.map((f) => [f.capitalId, f]));
 
   const players: Player[] = [

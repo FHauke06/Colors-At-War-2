@@ -1,8 +1,7 @@
 import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, NavalTech, SeaZone, SupportTech, Territory, UnitComposition } from '../engine/types';
 import { addAi, claimCapital, canStart, createLobby, removeAi } from '../engine/session';
 import { mainMapById } from '../data/MainMaps';
-import { buildGameStateFromLobby, buildGameStateFromScenario, lobbyFromScenario } from '../engine/setup';
-import type { Scenario } from '../data/Scenarios/types';
+import { buildGameStateFromLobby } from '../engine/setup';
 import { moveUnitsAnywhere, moveShips as moveShipsEngine, deploySeaFleet as deploySeaFleetEngine, seaShoot as seaShootEngine, cancelSeaBattle as cancelSeaBattleEngine, proposeSeaSimulation as proposeSeaSimulationEngine, declineSeaSimulation as declineSeaSimulationEngine, cascadeAiSeaBattle, startAmphibiousBattle, isSeaZoneId } from '../engine/naval';
 import type { SeaBattleResult } from '../engine/naval';
 import { endTurn, resumeAiTurnIfNeeded } from '../engine/turns';
@@ -61,9 +60,6 @@ export class LocalGameClient implements GameClient {
   private gameState: GameState | null = null;
   private readonly territories: readonly Territory[];
   private readonly seaZones: readonly SeaZone[];
-  /** Set only for a scenario game (see fromScenario) - start() branches on this to build the
-   *  scenario's full pre-populated GameState instead of the normal "one empty capital each". */
-  private readonly scenario: Scenario | null;
   private readonly lobbyListeners = new Set<(lobby: LobbyState) => void>();
   private readonly startListeners = new Set<(gameState: GameState) => void>();
   private readonly stateListeners = new Set<(gameState: GameState) => void>();
@@ -76,32 +72,24 @@ export class LocalGameClient implements GameClient {
   private attackerDeployment: readonly BattlePlacement[] | null = null;
   private defenderDeployment: readonly BattlePlacement[] | null = null;
 
-  private constructor(territories: readonly Territory[], seaZones: readonly SeaZone[], lobby: LobbyState, scenario: Scenario | null = null) {
+  private constructor(territories: readonly Territory[], seaZones: readonly SeaZone[], lobby: LobbyState) {
     this.territories = territories;
     this.seaZones = seaZones;
     this.lobby = lobby;
-    this.scenario = scenario;
   }
 
-  /** Normal offline game: an empty map where every seat (the human, then each added AI) still
-   *  needs a capital before start() will do anything. */
-  static newLobby(mapId: string, hostName: string, aiCount: number, aiDifficulty: AiDifficulty = 'medium'): LocalGameClient {
-    const map = mainMapById(mapId);
+  /** Offline game, same lobby as an online host's: on a free map every seat (the human, then each
+   *  added AI) still needs a capital before start() will do anything. With a `scenarioId` (see
+   *  data/Scenarios) the scenario brings its own map and fixed factions instead - `aiCount` is
+   *  ignored, the human just picks a faction in the lobby and every faction they leave unpicked
+   *  becomes an AI seat (engine/setup.ts's finalizeScenarioLobby), exactly like in a scenario
+   *  session on the server. */
+  static newLobby(mapId: string, hostName: string, aiCount: number, aiDifficulty: AiDifficulty = 'medium', scenarioId?: string): LocalGameClient {
+    let lobby = createLobby('LOKAL', 1, LOCAL_PLAYER_ID, hostName, mapId, aiDifficulty, scenarioId);
+    const map = mainMapById(lobby.mapId);
     const territories = map.territories;
-    let lobby = createLobby('LOKAL', 1, LOCAL_PLAYER_ID, hostName, mapId, aiDifficulty);
-    for (let i = 0; i < aiCount; i++) lobby = addAi(lobby, territories);
+    if (!scenarioId) for (let i = 0; i < aiCount; i++) lobby = addAi(lobby, territories);
     return new LocalGameClient(territories, map.seaZones, lobby);
-  }
-
-  /** Scenario game (see data/Scenarios): every faction's territories/garrisons/resources are
-   *  already fixed by the scenario - the human just picks which faction to play and the AI
-   *  difficulty for the rest. start() skips straight to buildGameStateFromScenario; there's no
-   *  capital-claiming lobby step. */
-  static fromScenario(scenario: Scenario, humanFactionIndex: number, humanName: string, aiDifficulty: AiDifficulty): LocalGameClient {
-    const map = mainMapById(scenario.mapId);
-    const territories = map.territories;
-    const lobby = lobbyFromScenario(scenario, humanFactionIndex, LOCAL_PLAYER_ID, humanName, aiDifficulty);
-    return new LocalGameClient(territories, map.seaZones, lobby, scenario);
   }
 
   getLobby(): LobbyState {
@@ -152,12 +140,10 @@ export class LocalGameClient implements GameClient {
 
   start(): void {
     if (!canStart(this.lobby)) {
-      this.errorListeners.forEach((cb) => cb('Noch nicht jeder Spieler hat eine Hauptstadt gewählt.'));
+      this.errorListeners.forEach((cb) => cb(this.lobby.scenarioId ? 'Wähle zuerst deine Fraktion.' : 'Noch nicht jeder Spieler hat eine Hauptstadt gewählt.'));
       return;
     }
-    this.gameState = this.scenario
-      ? buildGameStateFromScenario(this.scenario, this.lobby, this.territories)
-      : buildGameStateFromLobby(this.lobby, this.territories);
+    this.gameState = buildGameStateFromLobby(this.lobby, this.territories);
     this.lobby = { ...this.lobby, status: 'started' };
     const filtered = this.visibleState();
     this.startListeners.forEach((cb) => cb(filtered));
