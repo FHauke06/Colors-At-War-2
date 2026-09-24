@@ -16,7 +16,9 @@ import {
 import { pickRandomBattleMap, type BattleMap } from '../data/BattleMaps';
 import { areAllied, areAtWar } from './diplomacy';
 import { recordBattleOutcome, addToPlayerStats } from './stats';
-import { isSupportUnlocked } from './research';
+import { isSupportUnlocked, strengthTableFor, artilleryRangeFor, artilleryKillsPerPiece } from './research';
+import { STRENGTH, ARTILLERY_RANGE } from './unitStats';
+import type { StrengthTable } from './unitStats';
 import {
   airfieldAt,
   emptyAirComposition,
@@ -45,64 +47,61 @@ export const MAX_BATTLE_ROUNDS = 60;
 
 const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 };
 
-/** Same 5:2:1 ratio documented on UnitComposition: infantry=1, lightTank=2.5, heavyTank=5.
- *  Artillery carries no strength here at all (offense or defense) - its only combat role is the
- *  ranged bombardBattleCell action below, not ordinary adjacent movement/combat. Exported for
- *  ui/GameScreen.ts's Research tech-tree tooltips. */
-export const STRENGTH: UnitComposition = { infantry: 1, lightTank: 2.5, heavyTank: 5, artillery: 0, motorizedInfantry: 1 };
+/** Die Kampfwerte je Einheitentyp (5:2:1 - siehe unitStats.ts) und die Grundreichweite der Artillerie, hier für
+ *  ui/GameScreen.ts's Research-Tooltips wieder ausgeführt. Ein Spieler mit Upgrades hat höhere Werte: siehe
+ *  research.ts's strengthTableFor/artilleryRangeFor - die Kampffunktionen unten nehmen dafür optional die Tabelle des Besitzers. */
+export { STRENGTH, ARTILLERY_RANGE };
 
 /** Units fighting from a defended "kleines Gebiet" count 1.5x their nominal strength - ceil'd so
  *  a fight is never decided by a fractional point. */
 const DEFENSE_MULTIPLIER = 1.5;
 
-/** How many "kleine Gebiete" away (Chebyshev/8-directional distance, same convention as every
- *  other adjacency check on this grid) a bombardBattleCell shot can reach. */
-export const ARTILLERY_RANGE = 4;
-
 /** Rüstungspunkte spent each time useNuke is called, on top of the one-time SUPPORT_TECH_TREE
  *  research cost to unlock 'nuke' in the first place (see engine/research.ts). */
 export const NUKE_USE_COST = 750;
 
-export function battleStrength(composition: UnitComposition): number {
+/** `table` = die Kampfwerte des Besitzers dieser Einheiten (research.ts's strengthTableFor) - ohne Angabe die Grundwerte. */
+export function battleStrength(composition: UnitComposition, table: StrengthTable = STRENGTH): number {
   return (
-    composition.infantry * STRENGTH.infantry +
-    composition.lightTank * STRENGTH.lightTank +
-    composition.heavyTank * STRENGTH.heavyTank +
-    composition.artillery * STRENGTH.artillery +
-    composition.motorizedInfantry * STRENGTH.motorizedInfantry
+    composition.infantry * table.infantry +
+    composition.lightTank * table.lightTank +
+    composition.heavyTank * table.heavyTank +
+    composition.artillery * table.artillery +
+    composition.motorizedInfantry * table.motorizedInfantry
   );
 }
 
 /** A defending garrison's effective combat strength - see DEFENSE_MULTIPLIER. */
-export function defenseStrength(garrison: UnitComposition): number {
-  return Math.ceil(battleStrength(garrison) * DEFENSE_MULTIPLIER);
+export function defenseStrength(garrison: UnitComposition, table: StrengthTable = STRENGTH): number {
+  return Math.ceil(battleStrength(garrison, table) * DEFENSE_MULTIPLIER);
 }
 
-/** Removes `damage` worth of strength from `composition`, cheapest unit type first. Artillery
+/** Removes `damage` worth of strength from `composition`, cheapest unit type first - gemessen in den Kampfwerten von `table`
+ *  (dem Besitzer der Einheiten: aufgerüstete Einheiten sind mehr wert und fallen daher später). Artillery
  *  never defends itself (see UnitComposition) - it has zero STRENGTH, so it can't "afford" its way
  *  through the division-based peeling below the way the other types do. Instead, any nonzero
  *  damage that reaches a stack wipes every artillery piece in it outright, first, before infantry/
  *  lightTank/heavyTank casualties are computed from the remaining damage budget. */
-function reduceByStrength(composition: UnitComposition, damage: number): UnitComposition {
+function reduceByStrength(composition: UnitComposition, damage: number, table: StrengthTable = STRENGTH): UnitComposition {
   let left = damage;
   const remaining = { ...composition };
 
   if (left > 0) remaining.artillery = 0;
 
-  const infantryLost = Math.min(remaining.infantry, Math.floor(left / STRENGTH.infantry));
+  const infantryLost = Math.min(remaining.infantry, Math.floor(left / table.infantry));
   remaining.infantry -= infantryLost;
-  left -= infantryLost * STRENGTH.infantry;
+  left -= infantryLost * table.infantry;
 
   // Same strength tier as Infanterie (both 1) - taken next, same "cheapest first" convention.
-  const motorizedLost = Math.min(remaining.motorizedInfantry, Math.floor(left / STRENGTH.motorizedInfantry));
+  const motorizedLost = Math.min(remaining.motorizedInfantry, Math.floor(left / table.motorizedInfantry));
   remaining.motorizedInfantry -= motorizedLost;
-  left -= motorizedLost * STRENGTH.motorizedInfantry;
+  left -= motorizedLost * table.motorizedInfantry;
 
-  const lightLost = Math.min(remaining.lightTank, Math.floor(left / STRENGTH.lightTank));
+  const lightLost = Math.min(remaining.lightTank, Math.floor(left / table.lightTank));
   remaining.lightTank -= lightLost;
-  left -= lightLost * STRENGTH.lightTank;
+  left -= lightLost * table.lightTank;
 
-  const heavyLost = Math.min(remaining.heavyTank, Math.floor(left / STRENGTH.heavyTank));
+  const heavyLost = Math.min(remaining.heavyTank, Math.floor(left / table.heavyTank));
   remaining.heavyTank -= heavyLost;
 
   return remaining;
@@ -342,8 +341,11 @@ export function simulateAttack(
     return { ok: false, reason: 'Kein Kriegszustand - erst den Krieg erklären, bevor angegriffen werden kann.' };
   }
 
-  const attackerStrength = battleStrength(attackerForce);
-  const defenderStrength = battleStrength(defenders) * SIMULATED_DEFENSE_MULTIPLIER;
+  // Jede Seite kämpft mit den Kampfwerten ihres Besitzers (Schadens-Upgrades, siehe research.ts).
+  const attackerTable = strengthTableFor(gameState, playerId);
+  const defenderTable = strengthTableFor(gameState, toState.ownerId);
+  const attackerStrength = battleStrength(attackerForce, attackerTable);
+  const defenderStrength = battleStrength(defenders, defenderTable) * SIMULATED_DEFENSE_MULTIPLIER;
   const attackerWon = Math.random() < attackerStrength / (attackerStrength + defenderStrength);
 
   const nextTerritoryState = new Map(gameState.territoryState);
@@ -357,12 +359,12 @@ export function simulateAttack(
   );
   if (attackerWon) {
     // The wiped-out defenders take any guests standing with them along - none survive to stay.
-    const survivors = reduceByStrength(attackerForce, defenderStrength);
+    const survivors = reduceByStrength(attackerForce, defenderStrength, attackerTable);
     nextTerritoryState.set(toId, { ownerId: playerId, garrison: survivors, movedIn: survivors, extraMoveUsed: EMPTY_GARRISON });
   } else {
     // The defender's toughness bonus applies twice over: it made winning the roll more likely,
     // and it halves the damage they actually take in doing so (SIMULATED_DEFENSE_MULTIPLIER).
-    const survivors = reduceByStrength(defenders, attackerStrength / SIMULATED_DEFENSE_MULTIPLIER);
+    const survivors = reduceByStrength(defenders, attackerStrength / SIMULATED_DEFENSE_MULTIPLIER, defenderTable);
     nextTerritoryState.set(toId, setDefenderForce(toState, survivors, false));
   }
 
@@ -374,7 +376,7 @@ export function simulateAttack(
           loserId: toState.ownerId,
           attackerWon: true,
           winnerStarting: attackerForce,
-          winnerSurviving: reduceByStrength(attackerForce, defenderStrength),
+          winnerSurviving: reduceByStrength(attackerForce, defenderStrength, attackerTable),
           loserStarting: defenders,
           loserRetained: EMPTY_GARRISON,
         }
@@ -383,7 +385,7 @@ export function simulateAttack(
           loserId: playerId,
           attackerWon: false,
           winnerStarting: defenders,
-          winnerSurviving: reduceByStrength(defenders, attackerStrength / SIMULATED_DEFENSE_MULTIPLIER),
+          winnerSurviving: reduceByStrength(defenders, attackerStrength / SIMULATED_DEFENSE_MULTIPLIER, defenderTable),
           loserStarting: attackerForce,
           loserRetained: EMPTY_GARRISON,
         },
@@ -908,7 +910,7 @@ export function casStrike(
   // effect, even if CAS_STRIKE_DAMAGE_PER_UNIT is ever tuned back down below 1 strength/unit.
   const damage = Math.max(1, entry.count * CAS_STRIKE_DAMAGE_PER_UNIT);
   const nextSubState = new Map(pending.subState);
-  nextSubState.set(targetSubId, { ...targetState, garrison: reduceByStrength(targetState.garrison, damage) });
+  nextSubState.set(targetSubId, { ...targetState, garrison: reduceByStrength(targetState.garrison, damage, strengthTableFor(gameState, targetState.ownerId)) });
 
   const nextCalled = pending.calledAircraft.map((c) =>
     c.id === calledAircraftId ? { ...c, status: 'returning' as const, roundsRemaining: CAS_RETURN_TRIP_ROUNDS } : c,
@@ -1091,15 +1093,18 @@ export function moveBattleUnits(
       extraMoveUsed: addGarrisons(toState.extraMoveUsed, { ...EMPTY_GARRISON, motorizedInfantry: motorizedUsedOnce }),
     });
   } else {
-    const attackStrength = battleStrength(amount);
-    const effectiveDefenseStrength = defenseStrength(toState.garrison);
+    // Beide Seiten zählen mit den Kampfwerten ihres Besitzers (Schadens-Upgrades, siehe research.ts).
+    const attackerTable = strengthTableFor(gameState, playerId);
+    const defenderTable = strengthTableFor(gameState, toState.ownerId);
+    const attackStrength = battleStrength(amount, attackerTable);
+    const effectiveDefenseStrength = defenseStrength(toState.garrison, defenderTable);
     if (attackStrength > effectiveDefenseStrength) {
-      const survivors = reduceByStrength(amount, effectiveDefenseStrength);
+      const survivors = reduceByStrength(amount, effectiveDefenseStrength, attackerTable);
       nextSubState.set(toSubId, { ownerId: playerId, garrison: survivors, movedIn: survivors, extraMoveUsed: EMPTY_GARRISON });
     } else {
       // Defender holds (a tie also lands here: reduceByStrength by an equal amount empties it,
       // but the ground stays theirs since the attacker's force didn't survive to take it).
-      nextSubState.set(toSubId, { ...toState, garrison: reduceByStrength(toState.garrison, attackStrength) });
+      nextSubState.set(toSubId, { ...toState, garrison: reduceByStrength(toState.garrison, attackStrength, defenderTable) });
     }
   }
 
@@ -1129,9 +1134,9 @@ export type BombardOutcome =
 
 /**
  * Fires `artilleryCount` of the artillery sitting at `fromSubId` at an enemy-held cell up to
- * ARTILLERY_RANGE cells away (no adjacency or line-of-sight requirement, unlike moveBattleUnits) -
- * killing up to one Infanterie per artillery piece that fires, capped by however many are actually
- * there. Does nothing to lightTank/heavyTank/artillery at the target - see UnitComposition's note
+ * artilleryRangeFor cells away (ARTILLERY_RANGE, mit Reichweiten-Upgrade weiter; no adjacency or line-of-sight
+ * requirement, unlike moveBattleUnits) - killing up to artilleryKillsPerPiece Infanterie (1, mit Schadens-Upgrade 2) per
+ * artillery piece that fires, capped by however many are actually there. Does nothing to lightTank/heavyTank/artillery at the target - see UnitComposition's note
  * on artillery carrying no ordinary battle strength; bombardment is its entire combat role, and it
  * only ever targets Infanterie. The firing artillery stays put (this isn't a move) but is marked as
  * having acted this battle-turn via the same `movedIn` bookkeeping ordinary movement uses, so it
@@ -1157,8 +1162,9 @@ export function bombardBattleCell(
   const fromTerritory = pending.subTerritories.find((t) => t.id === fromSubId);
   const targetTerritory = pending.subTerritories.find((t) => t.id === targetSubId);
   if (!fromTerritory || !targetTerritory) return { ok: false, reason: 'Unbekanntes Feld.' };
-  if (subTerritoryDistance(fromTerritory, targetTerritory) > ARTILLERY_RANGE) {
-    return { ok: false, reason: `Ziel liegt außerhalb der Reichweite (${ARTILLERY_RANGE} Felder).` };
+  const range = artilleryRangeFor(gameState, playerId);
+  if (subTerritoryDistance(fromTerritory, targetTerritory) > range) {
+    return { ok: false, reason: `Ziel liegt außerhalb der Reichweite (${range} Felder).` };
   }
 
   const fromState = pending.subState.get(fromSubId);
@@ -1176,7 +1182,7 @@ export function bombardBattleCell(
   if (targetState.ownerId === playerId) return { ok: false, reason: 'Kann kein eigenes Feld beschießen.' };
   if (targetState.garrison.infantry === 0) return { ok: false, reason: 'Kein Infanterie-Ziel auf diesem Feld.' };
 
-  const infantryKilled = Math.min(targetState.garrison.infantry, artilleryCount);
+  const infantryKilled = Math.min(targetState.garrison.infantry, artilleryCount * artilleryKillsPerPiece(gameState, playerId));
 
   const nextSubState = new Map(pending.subState);
   nextSubState.set(fromSubId, {
@@ -1394,8 +1400,8 @@ export function endBattleTurn(gameState: GameState, playerId: string, territorie
 export function forceConcludeBattle(gameState: GameState, territories: readonly Territory[]): GameState {
   const pending = gameState.pendingBattle;
   if (!pending?.subState) return gameState;
-  const attackerStrength = battleStrength(subTerritoriesOwnedBy(pending.subState, pending.attackerId));
-  const defenderStrength = battleStrength(subTerritoriesOwnedBy(pending.subState, pending.defenderId));
+  const attackerStrength = battleStrength(subTerritoriesOwnedBy(pending.subState, pending.attackerId), strengthTableFor(gameState, pending.attackerId));
+  const defenderStrength = battleStrength(subTerritoriesOwnedBy(pending.subState, pending.defenderId), strengthTableFor(gameState, pending.defenderId));
   const result: BattleResult = {
     territoryId: pending.territoryId,
     attackerId: pending.attackerId,

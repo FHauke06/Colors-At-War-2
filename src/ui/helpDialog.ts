@@ -37,7 +37,7 @@ export const TAB_HELP: Record<TabId, { readonly title: string; readonly icon: Ui
   research: {
     title: 'Research',
     icon: 'research',
-    text: 'Schalte neue Einheiten- und Flugzeugtypen für Rüstungspunkte frei - Infanterie ist von Anfang an verfügbar. Manche Technologien setzen eine andere voraus. Fahre mit der Maus über eine Technologie, um ihre Werte zu sehen.',
+    text: 'Schalte neue Einheiten- und Flugzeugtypen für Rüstungspunkte frei - Infanterie ist von Anfang an verfügbar. Manche Technologien setzen eine andere voraus. Unter Panzern, Motorisierter Infanterie und Artillerie hängen Upgrades (mehr Schaden, bei der Artillerie auch mehr Reichweite), die erst nach der Erforschung der Einheit möglich sind. Fahre mit der Maus über eine Technologie oder ein Upgrade, um die Werte zu sehen.',
   },
 };
 

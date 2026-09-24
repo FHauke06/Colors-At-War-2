@@ -1,4 +1,4 @@
-import type { AirComposition, AirTech, BattlePlacement, BattleSubTerritory, CalledAircraft, GameState, GroundTech, NavalTech, PendingBattle, Player, SupportTech, TerritoryData, UnitComposition } from '../engine/types';
+import type { AirComposition, AirTech, BattlePlacement, BattleSubTerritory, CalledAircraft, GameState, GroundTech, NavalTech, PendingBattle, Player, SupportTech, TerritoryData, UnitComposition, UpgradeId } from '../engine/types';
 import { totalUnits, availableToMove, addGarrisons, subtractGarrisons, stackOf, defenderForce } from '../engine/movement';
 import { isEliminated, isGameOver, gameWinner, territoryStandings, remainingPlayers } from '../engine/victory';
 import { statsFor, totalTroopsFor, totalFactoriesFor } from '../engine/stats';
@@ -48,7 +48,27 @@ import {
   territoryDistance,
 } from '../engine/airforce';
 import type { BomberRaidMode } from '../engine/airforce';
-import { GROUND_TECH_TREE, AIR_TECH_TREE, SUPPORT_TECH_TREE, NAVAL_TECH_TREE, isGroundUnlocked, isAirUnlocked, isSupportUnlocked, isNavalUnlocked } from '../engine/research';
+import {
+  GROUND_TECH_TREE,
+  AIR_TECH_TREE,
+  SUPPORT_TECH_TREE,
+  NAVAL_TECH_TREE,
+  UPGRADE_TREE,
+  DAMAGE_UPGRADE_BONUS,
+  ARTILLERY_DAMAGE_UPGRADE_KILLS,
+  ARTILLERY_RANGE_UPGRADE_BONUS,
+  isGroundUnlocked,
+  isAirUnlocked,
+  isSupportUnlocked,
+  isNavalUnlocked,
+  hasUpgrade,
+  isUpgradeTechUnlocked,
+  upgradesOf,
+  strengthTableFor,
+  artilleryRangeFor,
+} from '../engine/research';
+import { ARTILLERY_KILLS_PER_PIECE } from '../engine/unitStats';
+import type { StrengthTable } from '../engine/unitStats';
 import { MapRenderer } from '../render/MapRenderer';
 import { UNIT_ICON_PATHS, UNIT_LABELS, UNIT_TYPES } from '../render/unitIcons';
 import { AIRCRAFT_ICON_PATHS, AIRCRAFT_LABELS, AIRCRAFT_TYPES } from '../render/aircraftIcons';
@@ -93,6 +113,39 @@ const NAVAL_TECH_LABELS: Record<NavalTech, string> = { ships: 'Schiffe' };
 const NAVAL_TECH_STATS: Record<NavalTech, string> = {
   ships: `Schiffe werden in Küstengebieten rekrutiert (${SHIP_COST} Pkt. pro Schiff) und besetzen Seezonen. Im Seekampf (Schiffe versenken) ist jedes Schiff genau 1 Kasten. Nur wer eine Seezone alleinig besetzt und dort mindestens 1 Schiff liegen hat, kann Landeinheiten überseetransportieren.`,
 };
+
+/** Name der Upgrades im Research-Tab - sie hängen direkt unter der Einheit, zu der sie gehören, der Name nennt nur die Art. */
+const UPGRADE_LABELS: Record<UpgradeId, string> = {
+  lightTankDamage: 'Mehr Schaden',
+  heavyTankDamage: 'Mehr Schaden',
+  motorizedInfantryDamage: 'Mehr Schaden',
+  artilleryDamage: 'Mehr Schaden',
+  artilleryRange: 'Mehr Reichweite',
+};
+
+/** Prozentangabe des Schadens-Upgrades ("+20 %"). */
+const DAMAGE_UPGRADE_PERCENT = Math.round(DAMAGE_UPGRADE_BONUS * 100);
+
+/** Kurzform der Wirkung eines Upgrades - steht immer auf seiner Karte (die Details zeigt upgradeStatsText beim Überfahren). */
+function upgradeEffectText(id: UpgradeId): string {
+  const def = UPGRADE_TREE[id];
+  if (def.group === 'ground') return `+${DAMAGE_UPGRADE_PERCENT} % Kampfwert`;
+  if (def.effect === 'damage') return `+${ARTILLERY_DAMAGE_UPGRADE_KILLS} Infanterie pro Geschütz und Beschuss`;
+  return `+${ARTILLERY_RANGE_UPGRADE_BONUS} Felder Reichweite`;
+}
+
+/** Hover-Tooltip zu einem Upgrade: was sich ändert, mit den echten Zahlen aus engine/research.ts. */
+function upgradeStatsText(id: UpgradeId): string {
+  const def = UPGRADE_TREE[id];
+  if (def.group === 'ground') {
+    const base = STRENGTH[def.tech];
+    return `${UNIT_LABELS[def.tech]}: Kampfwert ${base} → ${+(base * (1 + DAMAGE_UPGRADE_BONUS)).toFixed(2)} — im Angriff wie in der Verteidigung, auf der Hauptkarte wie im Schlachtfeld`;
+  }
+  if (def.effect === 'damage') {
+    return `Artillerie: Jedes Geschütz tötet pro Beschuss ${ARTILLERY_KILLS_PER_PIECE + ARTILLERY_DAMAGE_UPGRADE_KILLS} statt ${ARTILLERY_KILLS_PER_PIECE} Infanterie`;
+  }
+  return `Artillerie: Der Fernbeschuss reicht ${ARTILLERY_RANGE + ARTILLERY_RANGE_UPGRADE_BONUS} statt ${ARTILLERY_RANGE} Felder`;
+}
 
 /** Hover-tooltip text for engine/research.ts's SUPPORT_TECH_TREE. */
 const SUPPORT_TECH_STATS: Record<SupportTech, string> = {
@@ -535,6 +588,79 @@ export class GameScreen {
     return card;
   }
 
+  /** Ein Upgrade als kleine Karte im Zweig unter seiner Technologie: Art (Schaden/Reichweite), Kosten und - wie bei der
+   *  Technologie - entweder "Verbessern", der Hinweis auf die fehlende Einheit oder "Erforscht". Die Linie links und der
+   *  Abzweig zur Karte zeigen, zu welcher Einheit es gehört (siehe withUpgrades). */
+  private buildUpgradeCard(opts: {
+    readonly upgrade: UpgradeId;
+    readonly techLabel: string;
+    /** Die letzte Karte ihres Zweigs: die senkrechte Linie endet dort am Abzweig statt unter der Karte. */
+    readonly last: boolean;
+    readonly unlocked: boolean;
+    readonly prereqMet: boolean;
+    readonly canAfford: boolean;
+    readonly onUnlock: () => void;
+  }): HTMLDivElement {
+    const def = UPGRADE_TREE[opts.upgrade];
+    const row = document.createElement('div');
+    // Die Linien des Zweigs: `after:` ist die senkrechte Linie von der Technologie herab, `before:` der waagerechte Abzweig zur Karte.
+    row.className = `relative pb-1.5 pl-4 pt-1.5 before:absolute before:left-0 before:top-6 before:h-0.5 before:w-4 before:bg-slate-500 after:absolute after:left-0 after:top-0 after:w-0.5 after:bg-slate-500 ${
+      opts.last ? 'after:h-[26px]' : 'after:h-full'
+    }`;
+
+    const card = document.createElement('div');
+    card.className = `flex flex-col gap-1.5 rounded-md border p-2.5 ${
+      opts.unlocked ? 'border-emerald-700 bg-emerald-950/20' : 'border-slate-700 bg-slate-900/60'
+    }`;
+
+    const header = document.createElement('div');
+    header.className = 'flex items-center gap-2';
+    const label = document.createElement('span');
+    label.className = 'text-sm font-semibold text-slate-100';
+    label.textContent = UPGRADE_LABELS[opts.upgrade];
+    const tag = document.createElement('span');
+    tag.className = 'label-caps ml-auto rounded-sm border border-slate-500 px-1.5 text-[10px] leading-4 text-slate-400';
+    tag.textContent = 'Upgrade';
+    header.append(uiIcon(def.effect === 'range' ? 'range' : 'damage', 16), label, tag);
+    card.appendChild(header);
+
+    const effect = document.createElement('p');
+    effect.className = 'text-xs font-semibold text-slate-200';
+    effect.textContent = upgradeEffectText(opts.upgrade);
+    card.appendChild(effect);
+
+    // Wie bei den Technologien: die Details erscheinen erst beim Überfahren.
+    const stats = document.createElement('p');
+    stats.className = 'hidden text-xs text-slate-400';
+    stats.textContent = upgradeStatsText(opts.upgrade);
+    card.addEventListener('mouseenter', () => stats.classList.remove('hidden'));
+    card.addEventListener('mouseleave', () => stats.classList.add('hidden'));
+    card.appendChild(stats);
+
+    if (opts.unlocked) {
+      const badge = document.createElement('span');
+      badge.className = 'text-xs font-semibold text-emerald-400';
+      badge.textContent = '✓ Erforscht';
+      card.appendChild(badge);
+    } else if (!opts.prereqMet) {
+      const hint = document.createElement('p');
+      hint.className = 'text-xs text-slate-500';
+      hint.textContent = `Benötigt zuerst: ${opts.techLabel}`;
+      card.appendChild(hint);
+    } else {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = `Verbessern (${def.cost} Pkt.)`;
+      btn.className = `${primaryBtnClass} w-full`;
+      btn.disabled = !opts.canAfford;
+      btn.addEventListener('click', opts.onUnlock);
+      card.appendChild(btn);
+    }
+
+    row.appendChild(card);
+    return row;
+  }
+
   /** The Research tab's panel: two sub-tabs (Boden/Flugzeuge), each a grid of buildTechCard
    *  entries for engine/research.ts's GROUND_TECH_TREE/AIR_TECH_TREE. Built once, refreshed on
    *  every state update while active (same pattern as the map-recoloring tabs) since affordability
@@ -564,7 +690,7 @@ export class GameScreen {
     subTabRow.append(groundBtn, airBtn, supportBtn, navalBtn);
 
     const grid = document.createElement('div');
-    grid.className = 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3';
+    grid.className = 'grid grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3';
 
     let subTab: 'ground' | 'air' | 'support' | 'naval' = 'ground';
 
@@ -573,21 +699,50 @@ export class GameScreen {
       const myId = this.client.playerId;
       const points = this.currentGameState.resources.get(myId) ?? 0;
 
+      /** Die Technologie-Karte mit ihren Upgrades darunter: ein Zweig (senkrechte Linie mit Abzweigen), damit man sieht, zu
+       *  welcher Einheit ein Upgrade gehört. Technologien ohne Upgrade bleiben eine einzelne Karte. */
+      const withUpgrades = (tech: GroundTech | SupportTech, techCard: HTMLDivElement): HTMLElement => {
+        const ids = upgradesOf(tech);
+        if (ids.length === 0) return techCard;
+        const column = document.createElement('div');
+        column.className = 'flex flex-col';
+        const branch = document.createElement('div');
+        branch.className = 'ml-6 flex flex-col';
+        for (const [i, id] of ids.entries()) {
+          branch.appendChild(
+            this.buildUpgradeCard({
+              upgrade: id,
+              techLabel: tech === 'artillery' ? SUPPORT_TECH_LABELS.artillery : UNIT_LABELS[tech as GroundTech],
+              last: i === ids.length - 1,
+              unlocked: hasUpgrade(this.currentGameState, myId, id),
+              prereqMet: isUpgradeTechUnlocked(this.currentGameState, myId, id),
+              canAfford: points >= UPGRADE_TREE[id].cost,
+              onUnlock: () => this.client.unlockUpgrade(id),
+            }),
+          );
+        }
+        column.append(techCard, branch);
+        return column;
+      };
+
       if (subTab === 'ground') {
         for (const tech of ['lightTank', 'heavyTank', 'motorizedInfantry'] as const) {
           const def = GROUND_TECH_TREE[tech];
           grid.appendChild(
-            this.buildTechCard({
-              icon: createUnitIcon(tech, 'h-5 w-5 shrink-0'),
-              label: UNIT_LABELS[tech],
-              cost: def.cost,
-              requiresLabel: def.requires ? UNIT_LABELS[def.requires] : null,
-              statsText: GROUND_TECH_STATS[tech],
-              unlocked: isGroundUnlocked(this.currentGameState, myId, tech),
-              prereqMet: !def.requires || isGroundUnlocked(this.currentGameState, myId, def.requires),
-              canAfford: points >= def.cost,
-              onUnlock: () => this.client.unlockGroundTech(tech),
-            }),
+            withUpgrades(
+              tech,
+              this.buildTechCard({
+                icon: createUnitIcon(tech, 'h-5 w-5 shrink-0'),
+                label: UNIT_LABELS[tech],
+                cost: def.cost,
+                requiresLabel: def.requires ? UNIT_LABELS[def.requires] : null,
+                statsText: GROUND_TECH_STATS[tech],
+                unlocked: isGroundUnlocked(this.currentGameState, myId, tech),
+                prereqMet: !def.requires || isGroundUnlocked(this.currentGameState, myId, def.requires),
+                canAfford: points >= def.cost,
+                onUnlock: () => this.client.unlockGroundTech(tech),
+              }),
+            ),
           );
         }
       } else if (subTab === 'air') {
@@ -628,17 +783,20 @@ export class GameScreen {
         for (const tech of ['artillery', 'nuke'] as const) {
           const def = SUPPORT_TECH_TREE[tech];
           grid.appendChild(
-            this.buildTechCard({
-              icon: tech === 'artillery' ? createUnitIcon('artillery', 'h-5 w-5 shrink-0') : createNukeIcon('h-5 w-5 shrink-0'),
-              label: SUPPORT_TECH_LABELS[tech],
-              cost: def.cost,
-              requiresLabel: def.requires ? SUPPORT_TECH_LABELS[def.requires] : null,
-              statsText: SUPPORT_TECH_STATS[tech],
-              unlocked: isSupportUnlocked(this.currentGameState, myId, tech),
-              prereqMet: !def.requires || isSupportUnlocked(this.currentGameState, myId, def.requires),
-              canAfford: points >= def.cost,
-              onUnlock: () => this.client.unlockSupportTech(tech),
-            }),
+            withUpgrades(
+              tech,
+              this.buildTechCard({
+                icon: tech === 'artillery' ? createUnitIcon('artillery', 'h-5 w-5 shrink-0') : createNukeIcon('h-5 w-5 shrink-0'),
+                label: SUPPORT_TECH_LABELS[tech],
+                cost: def.cost,
+                requiresLabel: def.requires ? SUPPORT_TECH_LABELS[def.requires] : null,
+                statsText: SUPPORT_TECH_STATS[tech],
+                unlocked: isSupportUnlocked(this.currentGameState, myId, tech),
+                prereqMet: !def.requires || isSupportUnlocked(this.currentGameState, myId, def.requires),
+                canAfford: points >= def.cost,
+                onUnlock: () => this.client.unlockSupportTech(tech),
+              }),
+            ),
           );
         }
       }
@@ -1217,6 +1375,7 @@ export class GameScreen {
       attackerColor,
       defenderColor,
       cityStatus,
+      { mine: strengthTableFor(this.currentGameState, pending.attackerId), enemy: strengthTableFor(this.currentGameState, pending.defenderId) },
     );
 
     const { grid } = this.buildBattleGrid(pending, {
@@ -1335,7 +1494,10 @@ export class GameScreen {
       this.client.deployBattle(placementArray);
     });
 
-    const sidebar = this.buildBattleSidebar(sumCompositions([...placements.values()]), enemyMax, myColor, enemyColor);
+    const sidebar = this.buildBattleSidebar(sumCompositions([...placements.values()]), enemyMax, myColor, enemyColor, undefined, {
+      mine: strengthTableFor(this.currentGameState, this.client.playerId),
+      enemy: strengthTableFor(this.currentGameState, pending.attackerId === this.client.playerId ? pending.defenderId : pending.attackerId),
+    });
 
     function refreshAll(): void {
       remainingText.textContent = `Verbleibend im Pool: ${describeComposition(remaining)}`;
@@ -1528,7 +1690,10 @@ export class GameScreen {
       capturedCities: cities.filter((c) => subState.get(c.id)?.ownerId === pending.attackerId).length,
       totalCities: cities.length,
     };
-    const sidebar = this.buildBattleSidebar(sumOwnedBy(myId), sumOwnedBy(enemyId), myColor, enemyColor, cityStatus);
+    const sidebar = this.buildBattleSidebar(sumOwnedBy(myId), sumOwnedBy(enemyId), myColor, enemyColor, cityStatus, {
+      mine: strengthTableFor(this.currentGameState, myId),
+      enemy: strengthTableFor(this.currentGameState, enemyId),
+    });
     const airStatusPanel = this.buildAirSupportStatusPanel(pending, myId, enemyId, myColor, enemyColor);
     const selectionPanel = this.buildUnitSelectionPanel();
 
@@ -1551,7 +1716,7 @@ export class GameScreen {
       const fromT = pending.subTerritories.find((t) => t.id === fromSubId);
       const targetT = pending.subTerritories.find((t) => t.id === targetSubId);
       if (!fromT || !targetT) return false;
-      if (subTerritoryDistance(fromT, targetT) > ARTILLERY_RANGE) return false;
+      if (subTerritoryDistance(fromT, targetT) > artilleryRangeFor(this.currentGameState, myId)) return false;
       const targetState = subState.get(targetSubId);
       if (!targetState || targetState.ownerId === myId) return false;
       return targetState.garrison.infantry > 0;
@@ -1695,7 +1860,7 @@ export class GameScreen {
     const legendRow = document.createElement('p');
     legendRow.className = 'mt-3 text-center text-xs text-slate-500';
     const artilleryHint = hasAnyAvailableArtillery
-      ? ` Mit "Beschießen" feuert deine gesamte verfügbare Artillerie eines Feldes auf ein feindliches Feld mit Infanterie bis zu ${ARTILLERY_RANGE} Felder entfernt (rot markiert) - kein Nachbarfeld nötig, aber sie wehrt sich dabei nicht selbst.`
+      ? ` Mit "Beschießen" feuert deine gesamte verfügbare Artillerie eines Feldes auf ein feindliches Feld mit Infanterie bis zu ${artilleryRangeFor(this.currentGameState, this.client.playerId)} Felder entfernt (rot markiert) - kein Nachbarfeld nötig, aber sie wehrt sich dabei nicht selbst.`
       : '';
     legendRow.textContent =
       `Ziehe ein eigenes Feld mit verfügbaren Einheiten direkt auf ein angrenzendes Ziel (auch diagonal), um es zu bewegen oder anzugreifen - oder klicke es erst an, um rechts einzelne Einheiten abzuwählen, und klicke danach das Ziel.${artilleryHint} Mit "Luftunterstützung" rufst du Jäger oder CAS von Flugplätzen auf dem umkämpften oder einem angrenzenden Gebiet - Jäger kommen nach 1 Runde, CAS nach 3 und darf erst gerufen werden, wenn über 50% der Jäger in der Schlacht deine sind. Die goldenen Felder am oberen und unteren Rand führen zurück auf die Hauptkarte.`;
@@ -1848,6 +2013,7 @@ export class GameScreen {
     myColor: string,
     enemyColor: string,
     cityStatus?: { readonly capturedCities: number; readonly totalCities: number },
+    tables?: { readonly mine: StrengthTable; readonly enemy: StrengthTable },
   ): { el: HTMLDivElement; update: (mine: UnitComposition, enemy: UnitComposition) => void } {
     const el = document.createElement('div');
     el.className = 'flex w-full shrink-0 flex-col gap-3 rounded-md border border-slate-700 bg-slate-800/60 p-3 lg:w-56';
@@ -1918,8 +2084,8 @@ export class GameScreen {
     };
 
     const update = (nextMine: UnitComposition, nextEnemy: UnitComposition): void => {
-      const myStrength = battleStrength(nextMine);
-      const enemyStrength = battleStrength(nextEnemy);
+      const myStrength = battleStrength(nextMine, tables?.mine);
+      const enemyStrength = battleStrength(nextEnemy, tables?.enemy);
       const total = myStrength + enemyStrength;
       const myPercent = total > 0 ? (myStrength / total) * 100 : 50;
       chart.style.background =
@@ -2082,7 +2248,7 @@ export class GameScreen {
         list.appendChild(row);
       }
       const amount = getSelectedAmount();
-      summary.textContent = `Ausgewählt: ${describeComposition(amount)} (Stärke ${battleStrength(amount).toFixed(1)})`;
+      summary.textContent = `Ausgewählt: ${describeComposition(amount)} (Stärke ${battleStrength(amount, strengthTableFor(this.currentGameState, this.client.playerId)).toFixed(1)})`;
     };
 
     const showFor = (available: UnitComposition): void => {
@@ -2511,9 +2677,11 @@ export class GameScreen {
     const fromState = this.currentGameState.territoryState.get(fromId);
     const fromStack = fromState ? stackOf(fromState, this.client.playerId) : null;
     const toState = this.currentGameState.territoryState.get(toId);
-    const attackerStrength = fromStack ? battleStrength(availableToMove(fromStack)) : 0;
+    const attackerStrength = fromStack ? battleStrength(availableToMove(fromStack), strengthTableFor(this.currentGameState, this.client.playerId)) : 0;
     // The whole defending force: the owner's garrison plus any allied guests standing with it.
-    const defenderStrength = toState ? battleStrength(defenderForce(toState)) * SIMULATED_DEFENSE_MULTIPLIER : 0;
+    const defenderStrength = toState
+      ? battleStrength(defenderForce(toState), toState.ownerId ? strengthTableFor(this.currentGameState, toState.ownerId) : STRENGTH) * SIMULATED_DEFENSE_MULTIPLIER
+      : 0;
     const totalStrength = attackerStrength + defenderStrength;
     const winChance = totalStrength > 0 ? attackerStrength / totalStrength : 0;
     const winPercent = Math.round(winChance * 100);

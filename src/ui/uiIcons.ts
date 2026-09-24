@@ -26,6 +26,11 @@ export const UI_ICON_PATHS = {
     '<path fill-rule="evenodd" d="M1.5 2.5h13v8.6h-13zM3.1 4.1v5.4h9.8V4.1z"/><rect x="6.2" y="11.6" width="3.6" height="1.6"/><rect x="4" y="13.2" width="8" height="1.5"/>',
   network:
     '<circle cx="8" cy="3.4" r="2.3"/><circle cx="3.2" cy="12" r="2.3"/><circle cx="12.8" cy="12" r="2.3"/><path d="M8 3.4L3.2 12h9.6z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>',
+  // Upgrade "Schaden": ein Einschlag (achtzackiger Stern).
+  damage: '<path d="M8 .8l1.6 4.1 3.9-2-2 3.9 4.1 1.6-4.1 1.6 2 3.9-3.9-2L8 15.2l-1.6-4.1-3.9 2 2-3.9L.4 7.6l4.1-1.6-2-3.9 3.9 2z"/>',
+  // Upgrade "Reichweite": Zielring mit Kreuz.
+  range:
+    '<path fill-rule="evenodd" d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 2.2a4.8 4.8 0 1 1 0 9.6 4.8 4.8 0 0 1 0-9.6zM8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4z"/><rect x="7.2" y="0" width="1.6" height="3.6"/><rect x="7.2" y="12.4" width="1.6" height="3.6"/><rect x="0" y="7.2" width="3.6" height="1.6"/><rect x="12.4" y="7.2" width="3.6" height="1.6"/>',
   help: '<path fill-rule="evenodd" d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm-.8 10.4h1.6v1.6H7.2zM8 3.6c-1.6 0-2.7 1-2.7 2.5h1.5c0-.7.5-1.1 1.2-1.1.7 0 1.2.4 1.2 1 0 1.2-1.9 1.3-1.9 3.2h1.5c0-1.1 1.9-1.4 1.9-3.2C10.7 4.6 9.6 3.6 8 3.6z"/>',
   close: '<path d="M2.6 4.6l2-2L8 6l3.4-3.4 2 2L10 8l3.4 3.4-2 2L8 10l-3.4 3.4-2-2L6 8z"/>',
 } as const;

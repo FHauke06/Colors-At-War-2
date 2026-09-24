@@ -1,4 +1,4 @@
-import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameStateWire, GroundTech, LobbyState, NavalTech, SupportTech, UnitComposition } from '../engine/types';
+import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameStateWire, GroundTech, LobbyState, NavalTech, SupportTech, UnitComposition, UpgradeId } from '../engine/types';
 import type { BattleResult } from '../engine/combat';
 import type { SeaBattleResult } from '../engine/naval';
 import type { BomberRaidMode } from '../engine/airforce';
@@ -83,6 +83,7 @@ export type ClientMessage =
   | { readonly type: 'unlock_air_tech'; readonly tech: AirTech }
   | { readonly type: 'unlock_support_tech'; readonly tech: SupportTech }
   | { readonly type: 'unlock_naval_tech'; readonly tech: NavalTech }
+  | { readonly type: 'unlock_upgrade'; readonly upgrade: UpgradeId }
   | { readonly type: 'recruit_ships'; readonly territoryId: string; readonly count: number }
   | { readonly type: 'move_ships'; readonly fromId: string; readonly toId: string; readonly count: number }
   | { readonly type: 'deploy_sea_fleet'; readonly cells: readonly number[] }

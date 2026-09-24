@@ -1,4 +1,4 @@
-import type { UnitComposition } from '../../engine/types';
+import type { UnitComposition, UpgradeId } from '../../engine/types';
 
 /** One territory a scenario faction starts owning, with its own garrison (not necessarily uniform
  *  across the faction's territories - a capital usually gets a bigger one). */
@@ -39,6 +39,8 @@ export interface ScenarioFaction {
     readonly unlockedAir?: readonly ('fighters' | 'cas' | 'bombers')[];
     readonly unlockedSupport?: readonly ('artillery' | 'nuke')[];
     readonly unlockedNaval?: readonly 'ships'[];
+    /** Schon zum Start erforschte Upgrades (siehe engine/research.ts's UPGRADE_TREE). Weglassen = keine. */
+    readonly upgrades?: readonly UpgradeId[];
   };
 }
 

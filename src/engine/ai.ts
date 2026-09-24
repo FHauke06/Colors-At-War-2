@@ -1,4 +1,4 @@
-import type { AiDifficulty, AirComposition, BattlePlacement, BattleSubTerritory, GameState, PendingBattle, SeaZone, Territory, UnitComposition } from './types';
+import type { AiDifficulty, AirComposition, BattlePlacement, BattleSubTerritory, GameState, PendingBattle, SeaZone, Territory, UnitComposition, UpgradeId } from './types';
 import { moveShips, embarkUnits, disembarkUnits, startAmphibiousBattle, seaStateOf, availableShips, totalShips, cascadeAiSeaBattle, coastalZoneIds } from './naval';
 import { recruitShips, SHIP_COST, isCoastal } from './economy';
 import { moveUnits, totalUnits, availableToMove, subtractGarrisons, defenderForce, playerForce } from './movement';
@@ -14,13 +14,15 @@ import {
   SIMULATED_DEFENSE_MULTIPLIER,
   moveBattleUnits,
   bombardBattleCell,
-  ARTILLERY_RANGE,
+  STRENGTH,
   subTerritoryDistance,
   callAirSupport,
   casStrike,
   proposeBattleDraw,
 } from './combat';
 import type { BattleResult } from './combat';
+import { strengthTableFor, artilleryRangeFor, artilleryKillsPerPiece, grantUpgrade, hasUpgrade, researchAt, UPGRADE_TREE } from './research';
+import type { StrengthTable } from './unitStats';
 import {
   declareWar,
   proposePact,
@@ -86,6 +88,10 @@ interface AiDifficultyProfile {
   /** Chance, per owned Flugplatz with something to send and an eligible target, per AI turn, that
    *  runAiAirOffense actually launches it. */
   readonly airOffenseChanceScale: number;
+  /** Ab welcher Runde die KI die ersten Upgrades für ihre Einheiten bekommt und in welchem Abstand danach jeweils das nächste
+   *  (siehe runAiUpgrades) - Infinity = nie. */
+  readonly upgradeStartTurn: number;
+  readonly upgradeIntervalTurns: number;
 }
 
 const DIFFICULTY_PROFILES: Record<AiDifficulty, AiDifficultyProfile> = {
@@ -95,6 +101,8 @@ const DIFFICULTY_PROFILES: Record<AiDifficulty, AiDifficultyProfile> = {
     attackStrengthMargin: 1.6,
     maxDiversifiedShare: 0.3,
     airOffenseChanceScale: 0.25,
+    upgradeStartTurn: Infinity,
+    upgradeIntervalTurns: 1,
   },
   medium: {
     warStrengthMargin: 1.3,
@@ -102,6 +110,8 @@ const DIFFICULTY_PROFILES: Record<AiDifficulty, AiDifficultyProfile> = {
     attackStrengthMargin: 1.2,
     maxDiversifiedShare: 0.7,
     airOffenseChanceScale: 0.5,
+    upgradeStartTurn: 14,
+    upgradeIntervalTurns: 8,
   },
   hard: {
     warStrengthMargin: 1.05,
@@ -109,6 +119,8 @@ const DIFFICULTY_PROFILES: Record<AiDifficulty, AiDifficultyProfile> = {
     attackStrengthMargin: 1.0,
     maxDiversifiedShare: 0.85,
     airOffenseChanceScale: 0.75,
+    upgradeStartTurn: 7,
+    upgradeIntervalTurns: 5,
   },
 };
 
@@ -126,8 +138,13 @@ function techAffinityOf(gameState: GameState, aiPlayerId: string): number {
   return gameState.players.find((p) => p.id === aiPlayerId)?.aiTechAffinity ?? 0;
 }
 
+/** Die Kampfwerte des Besitzers eines Feldes (mit dessen Upgrades) - für ein unbesetztes Feld die Grundwerte. */
+function tableOf(gameState: GameState, ownerId: string | null): StrengthTable {
+  return ownerId ? strengthTableFor(gameState, ownerId) : STRENGTH;
+}
+
 function totalPlayerStrength(gameState: GameState, playerId: string): number {
-  return battleStrength(playerForce(gameState, playerId));
+  return battleStrength(playerForce(gameState, playerId), strengthTableFor(gameState, playerId));
 }
 
 /** Every other player's id who owns a territory directly bordering one of the AI's own. */
@@ -311,6 +328,7 @@ function launchAiAttack(
 function runAiAttacks(gameState: GameState, aiPlayerId: string, territories: readonly Territory[]): AttackPhaseResult {
   let state = gameState;
   const attackStrengthMargin = difficultyProfileOf(state, aiPlayerId).attackStrengthMargin;
+  const myTable = strengthTableFor(state, aiPlayerId);
   const ownedIds = [...state.territoryState.entries()].filter(([, s]) => s.ownerId === aiPlayerId).map(([id]) => id);
 
   for (const fromId of ownedIds) {
@@ -321,7 +339,7 @@ function runAiAttacks(gameState: GameState, aiPlayerId: string, territories: rea
 
     const available = availableToMove(fromState);
     if (totalUnits(available) === 0) continue;
-    const myStrength = battleStrength(available);
+    const myStrength = battleStrength(available, myTable);
 
     const targetId = fromTerritory.neighbors.find((neighborId) => {
       const neighborState = state.territoryState.get(neighborId);
@@ -329,7 +347,7 @@ function runAiAttacks(gameState: GameState, aiPlayerId: string, territories: rea
       const defenders = defenderForce(neighborState);
       if (totalUnits(defenders) === 0) return false;
       if (!areAtWar(state, aiPlayerId, neighborState.ownerId)) return false;
-      const theirStrength = battleStrength(defenders) * SIMULATED_DEFENSE_MULTIPLIER;
+      const theirStrength = battleStrength(defenders, tableOf(state, neighborState.ownerId)) * SIMULATED_DEFENSE_MULTIPLIER;
       return myStrength > theirStrength * attackStrengthMargin;
     });
     if (!targetId) continue;
@@ -340,6 +358,33 @@ function runAiAttacks(gameState: GameState, aiPlayerId: string, territories: rea
   }
 
   return { gameState: state, pendingAiDeployment: null };
+}
+
+/** Ab so vielen Einheiten eines Typs lohnt für die KI das Upgrade dazu. */
+const AI_UPGRADE_MIN_UNITS = 2;
+/** In dieser Reihenfolge bekommt die KI ihre Upgrades - erst das, was sie am meisten nutzt (Artillerie feuert kostenlos). */
+const AI_UPGRADE_PRIORITY: readonly UpgradeId[] = ['artilleryDamage', 'lightTankDamage', 'heavyTankDamage', 'artilleryRange', 'motorizedInfantryDamage'];
+
+/**
+ * Die KI erforscht Upgrades nicht mit Rüstungspunkten - sie gibt jede Runde alles aus und hat alle Einheiten ohnehin von Anfang
+ * an. Stattdessen bekommt sie planmäßig eins nach dem anderen (Schwierigkeit: ab welcher Runde und in welchem Abstand, siehe
+ * AiDifficultyProfile.upgradeStartTurn), aber nur für Einheiten, die sie wirklich im Feld hat (auch die, die ihr ein Szenario
+ * ohne erforschte Technologie mitgibt) - so hat sie nie ein Upgrade für etwas, das sie gar nicht einsetzt, und steht nicht ganz
+ * ohne da, wenn der Spieler seine Einheiten aufrüstet. Gezählt wird, wie
+ * viele Upgrades ihr bis zur aktuellen Runde zustehen (nicht nur "in genau dieser Runde"), damit eine ausgefallene Runde - etwa
+ * weil ein Angriff den Zug vorzeitig beendet hat - das Upgrade nur verschiebt statt es ganz zu überspringen.
+ */
+function runAiUpgrades(gameState: GameState, aiPlayerId: string): GameState {
+  const profile = difficultyProfileOf(gameState, aiPlayerId);
+  if (!(gameState.turn >= profile.upgradeStartTurn)) return gameState;
+  const due = Math.floor((gameState.turn - profile.upgradeStartTurn) / profile.upgradeIntervalTurns) + 1;
+  if ((researchAt(gameState, aiPlayerId).upgrades ?? []).length >= due) return gameState;
+  const force = playerForce(gameState, aiPlayerId);
+  const next = AI_UPGRADE_PRIORITY.find(
+    (id) =>
+      !hasUpgrade(gameState, aiPlayerId, id) && force[UPGRADE_TREE[id].tech] >= AI_UPGRADE_MIN_UNITS,
+  );
+  return next ? grantUpgrade(gameState, aiPlayerId, next) : gameState;
 }
 
 const MAX_ECONOMY_ACTIONS = 25;
@@ -606,6 +651,7 @@ export function playAiTurn(gameState: GameState, aiPlayerId: string, territories
 
   state = runAiExpansion(state, aiPlayerId, territories);
   state = runAiShipbuilding(state, aiPlayerId, seaZones);
+  state = runAiUpgrades(state, aiPlayerId);
   state = runAiEconomy(state, aiPlayerId);
   return { gameState: state, pendingAiDeployment: null };
 }
@@ -659,7 +705,7 @@ function runAiNaval(gameState: GameState, aiPlayerId: string, territories: reado
         if (out.ok) state = out.gameState;
         break;
       }
-      if (battleStrength(available) > defenseStrength(defenders) * margin * 0.75) {
+      if (battleStrength(available, strengthTableFor(state, aiPlayerId)) > defenseStrength(defenders, tableOf(state, t.ownerId)) * margin * 0.75) {
         const start = startAmphibiousBattle(state, aiPlayerId, zone.id, n, seaZones);
         if (!start.ok) continue;
         let s2 = start.gameState;
@@ -927,7 +973,7 @@ function useAirSupportInBattle(gameState: GameState, aiPlayerId: string, territo
 
 /**
  * Fires every bit of available artillery at whichever reachable enemy cell (within
- * ARTILLERY_RANGE, no adjacency needed) currently holds the most Infanterie - a free, no-lookahead
+ * artilleryRangeFor, no adjacency needed) currently holds the most Infanterie - a free, no-lookahead
  * "soften the biggest stack" heuristic, run before the AI's ordinary adjacent attacks each turn.
  * Artillery that has nothing worth targeting in range just sits idle this turn (see
  * bombardBattleCell - firing at an empty-of-infantry cell is rejected outright).
@@ -936,6 +982,7 @@ function bombardWithArtillery(gameState: GameState, aiPlayerId: string, territor
   let state = gameState;
   const pending = state.pendingBattle;
   if (!pending?.subState) return state;
+  const artilleryRange = artilleryRangeFor(state, aiPlayerId);
 
   for (const cell of pending.subTerritories) {
     const subState = state.pendingBattle?.subState;
@@ -949,7 +996,7 @@ function bombardWithArtillery(gameState: GameState, aiPlayerId: string, territor
     let bestTargetId: string | null = null;
     let bestInfantry = 0;
     for (const other of pending.subTerritories) {
-      if (subTerritoryDistance(cell, other) > ARTILLERY_RANGE) continue;
+      if (subTerritoryDistance(cell, other) > artilleryRange) continue;
       const otherState = subState.get(other.id);
       if (!otherState || otherState.ownerId === aiPlayerId) continue;
       if (otherState.garrison.infantry > bestInfantry) {
@@ -979,6 +1026,7 @@ function attackFavorableTargets(gameState: GameState, aiPlayerId: string, territ
   const pending = state.pendingBattle;
   if (!pending?.subState) return state;
   const caution = timeCautionFactor(pending, aiPlayerId);
+  const myTable = strengthTableFor(state, aiPlayerId);
 
   for (const cell of pending.subTerritories) {
     const subState = state.pendingBattle?.subState;
@@ -993,12 +1041,12 @@ function attackFavorableTargets(gameState: GameState, aiPlayerId: string, territ
     // bombardWithArtillery instead. Only the rest of the available force is ever committed here.
     const attackForce: UnitComposition = { ...available, artillery: 0 };
     if (totalUnits(attackForce) === 0) continue;
-    const myStrength = battleStrength(attackForce);
+    const myStrength = battleStrength(attackForce, myTable);
 
     const targetId = cell.neighbors.find((neighborId) => {
       const neighborState = subState.get(neighborId);
       if (!neighborState || neighborState.ownerId === aiPlayerId || totalUnits(neighborState.garrison) === 0) return false;
-      return myStrength > defenseStrength(neighborState.garrison) * caution;
+      return myStrength > defenseStrength(neighborState.garrison, tableOf(state, neighborState.ownerId)) * caution;
     });
     if (!targetId) continue;
 
@@ -1017,11 +1065,14 @@ function strongestAdjacentEnemyStrength(
   cell: BattleSubTerritory,
   subState: ReadonlyMap<string, { readonly ownerId: string; readonly garrison: UnitComposition }>,
   aiPlayerId: string,
+  gameState: GameState,
 ): number {
   let max = 0;
   for (const neighborId of cell.neighbors) {
     const neighborState = subState.get(neighborId);
-    if (neighborState && neighborState.ownerId !== aiPlayerId) max = Math.max(max, battleStrength(neighborState.garrison));
+    if (neighborState && neighborState.ownerId !== aiPlayerId) {
+      max = Math.max(max, battleStrength(neighborState.garrison, tableOf(gameState, neighborState.ownerId)));
+    }
   }
   return max;
 }
@@ -1051,8 +1102,8 @@ function retreatFromHopelessFights(gameState: GameState, aiPlayerId: string, ter
     const available = subtractGarrisons(cellState.garrison, cellState.movedIn);
     if (totalUnits(available) === 0) continue;
 
-    const threat = strongestAdjacentEnemyStrength(cell, subState, aiPlayerId);
-    if (threat === 0 || defenseStrength(cellState.garrison) / caution > threat) continue; // untouched, or can hold
+    const threat = strongestAdjacentEnemyStrength(cell, subState, aiPlayerId, state);
+    if (threat === 0 || defenseStrength(cellState.garrison, strengthTableFor(state, aiPlayerId)) / caution > threat) continue; // untouched, or can hold
 
     const saferNeighborId = cell.neighbors.find((neighborId) => {
       const neighborState = subState.get(neighborId);
@@ -1063,7 +1114,7 @@ function retreatFromHopelessFights(gameState: GameState, aiPlayerId: string, ter
       // that's a deliberate withdrawal onto the main map, not a same-turn defensive sidestep. Skip
       // it here so a genuinely reachable safer cell isn't passed over for one that would just fail.
       if (neighborCell.isEscape) return false;
-      return strongestAdjacentEnemyStrength(neighborCell, subState, aiPlayerId) < threat;
+      return strongestAdjacentEnemyStrength(neighborCell, subState, aiPlayerId, state) < threat;
     });
     if (!saferNeighborId) continue;
 
@@ -1260,12 +1311,19 @@ function unitsOnBattlefield(pending: PendingBattle, ownerId: string): UnitCompos
  * etwas bewegen) UND der Angreifer kann den Verteidiger nicht mehr schlagen, ohne selbst zu verlieren, gemessen als
  * Angreifer-Stärke <= Verteidiger-Stärke auf dem Schlachtfeld (battleStrength der jeweils noch vorhandenen Einheiten).
  */
-export function aiWantsDraw(pending: PendingBattle): boolean {
+export function aiWantsDraw(pending: PendingBattle, gameState?: GameState): boolean {
   if (!pending.subState) return false;
   const attacker = unitsOnBattlefield(pending, pending.attackerId);
   const defender = unitsOnBattlefield(pending, pending.defenderId);
   if (attacker.artillery > 0 || defender.artillery > 0) return false;
-  return battleStrength(attacker) <= battleStrength(defender);
+  const tables = battleTables(pending, gameState);
+  return battleStrength(attacker, tables.attacker) <= battleStrength(defender, tables.defender);
+}
+
+/** Die Kampfwerte der beiden Seiten eines Kampfes (mit ihren Upgrades) - ohne bekannten Spielstand die Grundwerte. */
+function battleTables(pending: PendingBattle, gameState?: GameState): { readonly attacker: StrengthTable; readonly defender: StrengthTable } {
+  if (!gameState) return { attacker: STRENGTH, defender: STRENGTH };
+  return { attacker: strengthTableFor(gameState, pending.attackerId), defender: strengthTableFor(gameState, pending.defenderId) };
 }
 
 /** Kein einziger Soldat - Ausgangspunkt für die Summen der Kampfeinschätzung. */
@@ -1334,7 +1392,7 @@ function turnsToReach(pending: PendingBattle, targets: readonly BattleSubTerrito
  * - ungünstig für ihn: feindliche Artillerie/CAS dezimiert ihn, seine eigene trifft nicht, der Verteidiger verschanzt sich
  *   mit allem, was er hat, und der Angreifer braucht Reserve in der Zeit.
  */
-function battleOutlook(pending: PendingBattle): BattleOutlook {
+function battleOutlook(pending: PendingBattle, gameState?: GameState): BattleOutlook {
   const subState = pending.subState;
   if (!subState) return { attackerMayWin: true, attackerSurelyWins: false }; // noch keine Kampfphase: keine Aussage
   const attacker = unitsOnBattlefield(pending, pending.attackerId);
@@ -1342,19 +1400,22 @@ function battleOutlook(pending: PendingBattle): BattleOutlook {
   const turns = attackerTurnsLeft(pending);
   if (turns === 0 || totalUnits(attacker) === 0) return { attackerMayWin: false, attackerSurelyWins: false };
 
-  const attackerStrength = battleStrength(attacker);
-  const defenderStrength = battleStrength(defender);
-  // Feuer auf Distanz über die restliche Zeit: Artillerie tötet je Zug höchstens eine Infanterie pro Geschütz, ein CAS-Schlag
-  // wirft Stärke ab.
-  const attackerFire = Math.min(defender.infantry, attacker.artillery * turns) + pendingCasDamage(pending, 'attacker');
-  const defenderFire = Math.min(attacker.infantry, defender.artillery * turns) + pendingCasDamage(pending, 'defender');
+  const tables = battleTables(pending, gameState);
+  const attackerStrength = battleStrength(attacker, tables.attacker);
+  const defenderStrength = battleStrength(defender, tables.defender);
+  // Feuer auf Distanz über die restliche Zeit: Artillerie tötet je Zug höchstens artilleryKillsPerPiece Infanterie pro Geschütz
+  // (eine, mit Schadens-Upgrade zwei), ein CAS-Schlag wirft Stärke ab.
+  const attackerKills = gameState ? artilleryKillsPerPiece(gameState, pending.attackerId) : 1;
+  const defenderKills = gameState ? artilleryKillsPerPiece(gameState, pending.defenderId) : 1;
+  const attackerFire = Math.min(defender.infantry, attacker.artillery * attackerKills * turns) + pendingCasDamage(pending, 'attacker');
+  const defenderFire = Math.min(attacker.infantry, defender.artillery * defenderKills * turns) + pendingCasDamage(pending, 'defender');
 
   // Günstig für den Angreifer.
   const citiesToTake = pending.subTerritories.filter((t) => t.isCity && subState.get(t.id)?.ownerId !== pending.attackerId);
   let cityCost = 0;
   for (const city of citiesToTake) {
     const cell = subState.get(city.id);
-    if (cell && cell.ownerId === pending.defenderId) cityCost += defenseStrength(cell.garrison);
+    if (cell && cell.ownerId === pending.defenderId) cityCost += defenseStrength(cell.garrison, tables.defender);
   }
   const cityCostAfterFire = Math.max(0, cityCost - defenseStrength({ ...NO_UNITS, infantry: attackerFire }));
   const defendersLeft = pending.subTerritories.filter((t) => {
@@ -1366,7 +1427,7 @@ function battleOutlook(pending: PendingBattle): BattleOutlook {
   const wipeCost = costToBreak(Math.max(0, defenderStrength - attackerFire));
   // Reine Artillerie kann eine Truppe aus lauter Infanterie ganz allein aufreiben.
   const infantryOnly = defender.lightTank + defender.heavyTank + defender.motorizedInfantry + defender.artillery === 0;
-  const artilleryWipes = attacker.artillery > 0 && infantryOnly && attacker.artillery * turns >= defender.infantry;
+  const artilleryWipes = attacker.artillery > 0 && infantryOnly && attacker.artillery * attackerKills * turns >= defender.infantry;
   const attackerMayWin =
     artilleryWipes ||
     (citiesInTime && attackerStrength > cityCostAfterFire) ||
@@ -1387,8 +1448,8 @@ function battleOutlook(pending: PendingBattle): BattleOutlook {
  * - Als Verteidiger ist sie verloren, wenn der Angreifer sie auch im ungünstigsten Fall überrollt; solange er sie nicht sicher
  *   überrollt, gewinnt sie mindestens die Uhr.
  */
-export function aiCanStillWin(pending: PendingBattle, aiId: string): boolean {
-  const outlook = battleOutlook(pending);
+export function aiCanStillWin(pending: PendingBattle, aiId: string, gameState?: GameState): boolean {
+  const outlook = battleOutlook(pending, gameState);
   return pending.attackerId === aiId ? outlook.attackerMayWin : !outlook.attackerSurelyWins;
 }
 
@@ -1413,8 +1474,8 @@ export function aiHandleDraw(
   const alreadyOffered = isAttacker ? pending.attackerDrawOffer : pending.defenderDrawOffer;
   const opponentOffered = isAttacker ? pending.defenderDrawOffer : pending.attackerDrawOffer;
   if (alreadyOffered) return { gameState, concluded: null };
-  const accept = !!opponentOffered && (aiWantsDraw(pending) || !aiCanStillWin(pending, aiId));
-  const offer = !opponentOffered && mayOffer && pending.battleRound >= AI_DRAW_OFFER_MIN_ROUND && aiWantsDraw(pending);
+  const accept = !!opponentOffered && (aiWantsDraw(pending, gameState) || !aiCanStillWin(pending, aiId, gameState));
+  const offer = !opponentOffered && mayOffer && pending.battleRound >= AI_DRAW_OFFER_MIN_ROUND && aiWantsDraw(pending, gameState);
   if (!accept && !offer) return { gameState, concluded: null };
   const out = proposeBattleDraw(gameState, aiId);
   return out.ok ? { gameState: out.gameState, concluded: out.concluded } : { gameState, concluded: null };

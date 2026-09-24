@@ -17,7 +17,7 @@ import {
   withdrawAllianceProposal,
   leaveAlliance,
 } from '../src/engine/diplomacy';
-import { unlockGroundTech, unlockAirTech, unlockSupportTech, unlockNavalTech } from '../src/engine/research';
+import { unlockGroundTech, unlockAirTech, unlockSupportTech, unlockNavalTech, unlockUpgrade } from '../src/engine/research';
 import { filterGameStateForViewer } from '../src/engine/visibility';
 import {
   startBattle,
@@ -248,6 +248,16 @@ wss.on('connection', (ws) => {
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
           const outcome = unlockNavalTech(session.gameState, playerId, msg.tech);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          session.gameState = outcome.gameState;
+          broadcastGameState(session);
+          break;
+        }
+        case 'unlock_upgrade': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = unlockUpgrade(session.gameState, playerId, msg.upgrade);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           broadcastGameState(session);

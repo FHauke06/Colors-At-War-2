@@ -1,4 +1,4 @@
-import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, NavalTech, SupportTech, UnitComposition } from '../engine/types';
+import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, NavalTech, SupportTech, UnitComposition, UpgradeId } from '../engine/types';
 import { deserializeGameState } from '../engine/session';
 import type { BattleResult } from '../engine/combat';
 import type { SeaBattleResult } from '../engine/naval';
@@ -289,6 +289,10 @@ export class RemoteGameClient implements GameClient {
 
   unlockNavalTech(tech: NavalTech): void {
     this.send({ type: 'unlock_naval_tech', tech });
+  }
+
+  unlockUpgrade(upgrade: UpgradeId): void {
+    this.send({ type: 'unlock_upgrade', upgrade });
   }
 
   recruitShips(territoryId: string, count: number): void {

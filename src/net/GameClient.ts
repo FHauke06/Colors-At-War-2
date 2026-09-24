@@ -1,4 +1,4 @@
-import type { AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, NavalTech, SupportTech, UnitComposition } from '../engine/types';
+import type { AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, NavalTech, SupportTech, UnitComposition, UpgradeId } from '../engine/types';
 import type { BattleResult } from '../engine/combat';
 import type { SeaBattleResult } from '../engine/naval';
 import type { BomberRaidMode } from '../engine/airforce';
@@ -74,8 +74,9 @@ export interface GameClient {
    *  onError) unless it's this player's turn within the battle, or the destination is defended. */
   escapeBattle(fromSubId: string, destinationId: string, amount: UnitComposition): void;
   /** Fires `artilleryCount` of the artillery at `fromSubId` at an enemy-held cell up to
-   *  ARTILLERY_RANGE cells away (see engine/combat.ts) - no adjacency needed. Kills up to one
-   *  Infanterie per artillery piece fired, nothing else. No-op (with an onError) unless it's this
+   *  artilleryRangeFor cells away (ARTILLERY_RANGE, mit Reichweiten-Upgrade weiter - see engine/combat.ts) - no
+   *  adjacency needed. Kills up to one Infanterie per artillery piece fired (two with the Schadens-Upgrade),
+   *  nothing else. No-op (with an onError) unless it's this
    *  player's turn within the battle, the target is in range and enemy-held, or there's no
    *  Infanterie there to hit. */
   bombardBattleCell(fromSubId: string, targetSubId: string, artilleryCount: number): void;
@@ -158,6 +159,9 @@ export interface GameClient {
   unlockSupportTech(tech: SupportTech): void;
   /** Wie unlockGroundTech, für die Marine (engine/research.ts's NAVAL_TECH_TREE, Tech `ships`). */
   unlockNavalTech(tech: NavalTech): void;
+  /** Erforscht ein Upgrade zu einer schon erforschten Einheit (engine/research.ts's UPGRADE_TREE): mehr Schaden für Panzer,
+   *  Motorisierte Infanterie und Artillerie, mehr Reichweite für die Artillerie. Kostet Rüstungspunkte, nur am Zug. */
+  unlockUpgrade(upgrade: UpgradeId): void;
   /** Rekrutiert `count` Schiffe (SHIP_COST je Stück) in einem eigenen Küstengebiet. */
   recruitShips(territoryId: string, count: number): void;
   /** Bewegt Schiffe Küste <-> Seezone bzw. Zone <-> Zone. Fährt man in eine feindliche Zone mit Schiffen

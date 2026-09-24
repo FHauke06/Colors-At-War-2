@@ -196,6 +196,7 @@ export function buildGameStateFromScenario(scenario: Scenario, lobby: LobbyState
         unlockedAir: [...(faction.researchState.unlockedAir ?? [])],
         unlockedSupport: [...(faction.researchState.unlockedSupport ?? [])],
         unlockedNaval: [...(faction.researchState.unlockedNaval ?? [])],
+        upgrades: [...(faction.researchState.upgrades ?? [])],
       });
     } else if (player.isAI) {
       research.set(player.id, fullResearchState());

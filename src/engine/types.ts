@@ -73,6 +73,11 @@ export type NavalTech = 'ships';
  *  engine/ai.ts's DIFFICULTY_PROFILES for exactly which thresholds move. */
 export type AiDifficulty = 'easy' | 'medium' | 'hard';
 
+/** Ein Upgrade zu einer erforschten Einheit (engine/research.ts's UPGRADE_TREE): `...Damage` erhöht den Kampfwert der
+ *  Armee-Einheit (die Artillerie: wie viele Infanterie ein Geschütz pro Beschuss tötet), `artilleryRange` die Reichweite
+ *  der Artillerie. Sie hängen im Research-Tab direkt unter der Technologie, zu der sie gehören. */
+export type UpgradeId = 'lightTankDamage' | 'heavyTankDamage' | 'motorizedInfantryDamage' | 'artilleryDamage' | 'artilleryRange';
+
 /** Which non-Infanterie unit/aircraft types a player has unlocked via the Research tab - see
  *  engine/research.ts. Infanterie needs no unlock, always available. Sparse in GameState.research:
  *  a player with no entry has unlocked nothing (the human default at game start) - AI seats get
@@ -83,6 +88,9 @@ export interface ResearchState {
   readonly unlockedAir: readonly AirTech[];
   readonly unlockedSupport: readonly SupportTech[];
   readonly unlockedNaval: readonly NavalTech[];
+  /** Erforschte Upgrades (siehe UpgradeId). Optional: Spielstände von vor den Upgrades haben das Feld nicht - fehlt es,
+   *  hat der Spieler keins. */
+  readonly upgrades?: readonly UpgradeId[];
 }
 
 export interface Player {

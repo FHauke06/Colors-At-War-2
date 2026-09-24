@@ -1,7 +1,9 @@
 import type { AirComposition, AirfieldState, GameState, Territory, UnitComposition } from './types';
 import { areAtWar } from './diplomacy';
 import { defenderForce, setDefenderForce } from './movement';
-import { isAirUnlocked } from './research';
+import { isAirUnlocked, strengthTableFor } from './research';
+import { STRENGTH } from './unitStats';
+import type { StrengthTable } from './unitStats';
 import { developmentAt } from './economy';
 
 const AIR_TECH_LABEL: Record<keyof AirComposition, string> = {
@@ -311,27 +313,27 @@ export function resolveAirCombatForRound(gameState: GameState, territories: read
 
 /** Removes `damage` strength-worth of units from a garrison, cheapest first (same convention as
  *  engine/combat.ts's reduceByStrength, duplicated here to avoid a combat.ts <-> airforce.ts
- *  import cycle - both files independently implement the exact same STRENGTH scale). */
-function reduceGarrisonByStrength(garrison: UnitComposition, damage: number): UnitComposition {
-  const STRENGTH = { infantry: 1, lightTank: 2.5, heavyTank: 5, artillery: 0, motorizedInfantry: 1 };
+ *  import cycle - both use the same STRENGTH scale from unitStats.ts). `table` = die Kampfwerte des Besitzers der
+ *  Einheiten (aufgerüstete Einheiten fallen später). */
+function reduceGarrisonByStrength(garrison: UnitComposition, damage: number, table: StrengthTable = STRENGTH): UnitComposition {
   let left = damage;
   const remaining = { ...garrison };
   if (left > 0) remaining.artillery = 0;
 
-  const infantryLost = Math.min(remaining.infantry, Math.floor(left / STRENGTH.infantry));
+  const infantryLost = Math.min(remaining.infantry, Math.floor(left / table.infantry));
   remaining.infantry -= infantryLost;
-  left -= infantryLost * STRENGTH.infantry;
+  left -= infantryLost * table.infantry;
 
   // Same strength tier as Infanterie (both 1) - taken next, same "cheapest first" convention.
-  const motorizedLost = Math.min(remaining.motorizedInfantry, Math.floor(left / STRENGTH.motorizedInfantry));
+  const motorizedLost = Math.min(remaining.motorizedInfantry, Math.floor(left / table.motorizedInfantry));
   remaining.motorizedInfantry -= motorizedLost;
-  left -= motorizedLost * STRENGTH.motorizedInfantry;
+  left -= motorizedLost * table.motorizedInfantry;
 
-  const lightLost = Math.min(remaining.lightTank, Math.floor(left / STRENGTH.lightTank));
+  const lightLost = Math.min(remaining.lightTank, Math.floor(left / table.lightTank));
   remaining.lightTank -= lightLost;
-  left -= lightLost * STRENGTH.lightTank;
+  left -= lightLost * table.lightTank;
 
-  const heavyLost = Math.min(remaining.heavyTank, Math.floor(left / STRENGTH.heavyTank));
+  const heavyLost = Math.min(remaining.heavyTank, Math.floor(left / table.heavyTank));
   remaining.heavyTank -= heavyLost;
 
   return remaining;
@@ -446,7 +448,7 @@ export function launchBomberRaid(
   const nextTerritoryState = new Map(gameState.territoryState);
   nextTerritoryState.set(
     targetTerritoryId,
-    setDefenderForce(targetState, reduceGarrisonByStrength(defenderForce(targetState), damageDealt), false),
+    setDefenderForce(targetState, reduceGarrisonByStrength(defenderForce(targetState), damageDealt, targetState.ownerId ? strengthTableFor(gameState, targetState.ownerId) : STRENGTH), false),
   );
 
   return {

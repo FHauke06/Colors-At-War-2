@@ -1,4 +1,4 @@
-import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, NavalTech, SeaZone, SupportTech, Territory, UnitComposition } from '../engine/types';
+import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, NavalTech, SeaZone, SupportTech, Territory, UnitComposition, UpgradeId } from '../engine/types';
 import { addAi, claimCapital, canStart, createLobby, removeAi } from '../engine/session';
 import { mainMapById } from '../data/MainMaps';
 import { buildGameStateFromLobby } from '../engine/setup';
@@ -6,7 +6,7 @@ import { moveUnitsAnywhere, moveShips as moveShipsEngine, deploySeaFleet as depl
 import type { SeaBattleResult } from '../engine/naval';
 import { endTurn, resumeAiTurnIfNeeded } from '../engine/turns';
 import { recruitUnits, recruitShips as recruitShipsEngine, buildFactory as buildFactoryEngine, upgradeInfrastructure as upgradeInfrastructureEngine } from '../engine/economy';
-import { unlockNavalTech as unlockNavalTechEngine, unlockGroundTech as unlockGroundTechEngine, unlockAirTech as unlockAirTechEngine, unlockSupportTech as unlockSupportTechEngine } from '../engine/research';
+import { unlockNavalTech as unlockNavalTechEngine, unlockGroundTech as unlockGroundTechEngine, unlockAirTech as unlockAirTechEngine, unlockSupportTech as unlockSupportTechEngine, unlockUpgrade as unlockUpgradeEngine } from '../engine/research';
 import {
   startBattle,
   simulateAttack as simulateAttackEngine,
@@ -613,6 +613,17 @@ export class LocalGameClient implements GameClient {
   unlockNavalTech(tech: NavalTech): void {
     if (!this.gameState) return;
     const outcome = unlockNavalTechEngine(this.gameState, this.playerId, tech);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.gameState = outcome.gameState;
+    this.notifyState();
+  }
+
+  unlockUpgrade(upgrade: UpgradeId): void {
+    if (!this.gameState) return;
+    const outcome = unlockUpgradeEngine(this.gameState, this.playerId, upgrade);
     if (!outcome.ok) {
       this.errorListeners.forEach((cb) => cb(outcome.reason));
       return;
