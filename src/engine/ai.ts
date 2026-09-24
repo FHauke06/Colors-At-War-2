@@ -1,5 +1,7 @@
-import type { AiDifficulty, AirComposition, BattlePlacement, BattleSubTerritory, GameState, PendingBattle, Territory, UnitComposition } from './types';
-import { moveUnits, totalUnits, availableToMove, subtractGarrisons } from './movement';
+import type { AiDifficulty, AirComposition, BattlePlacement, BattleSubTerritory, GameState, PendingBattle, SeaZone, Territory, UnitComposition } from './types';
+import { moveShips, embarkUnits, disembarkUnits, startAmphibiousBattle, seaStateOf, availableShips, totalShips, cascadeAiSeaBattle, coastalZoneIds } from './naval';
+import { recruitShips, SHIP_COST, isCoastal } from './economy';
+import { moveUnits, totalUnits, availableToMove, subtractGarrisons, defenderForce, playerForce } from './movement';
 import {
   startBattle,
   markDeployed,
@@ -16,8 +18,20 @@ import {
   subTerritoryDistance,
   callAirSupport,
   casStrike,
+  proposeBattleDraw,
 } from './combat';
-import { declareWar, proposePact, areAtWar, hasPendingProposal } from './diplomacy';
+import type { BattleResult } from './combat';
+import {
+  declareWar,
+  proposePact,
+  proposeAlliance,
+  allianceConflict,
+  allianceMembers,
+  areAllied,
+  areAtWar,
+  hasPendingProposal,
+  hasPendingAllianceProposal,
+} from './diplomacy';
 import {
   recruitUnits,
   buildFactory,
@@ -40,6 +54,7 @@ import {
   fighterSweep,
   territoryDistance,
   AIRCRAFT_COST_PER_100,
+  AIRCRAFT_PACKET_SIZE,
   AIRFIELD_BUILD_COST,
   AIRFIELD_UPGRADE_COST,
   FIGHTER_RANGE,
@@ -111,11 +126,7 @@ function techAffinityOf(gameState: GameState, aiPlayerId: string): number {
 }
 
 function totalPlayerStrength(gameState: GameState, playerId: string): number {
-  let total = 0;
-  for (const [, state] of gameState.territoryState) {
-    if (state.ownerId === playerId) total += battleStrength(state.garrison);
-  }
-  return total;
+  return battleStrength(playerForce(gameState, playerId));
 }
 
 /** Every other player's id who owns a territory directly bordering one of the AI's own. */
@@ -131,28 +142,71 @@ function borderingRivalIds(gameState: GameState, territories: readonly Territory
   return rivals;
 }
 
+/** Total military strength of every player in `playerIds`' alliances, each player counted once -
+ *  what actually fights together, since a war joins a whole alliance (see
+ *  engine/diplomacy.ts's propagateAllianceWars). A player without allies is just themselves. */
+function coalitionStrength(gameState: GameState, playerIds: Iterable<string>): number {
+  const members = new Set<string>();
+  for (const id of playerIds) for (const member of allianceMembers(gameState, id)) members.add(member);
+  let total = 0;
+  for (const member of members) total += totalPlayerStrength(gameState, member);
+  return total;
+}
+
+/** Everyone at war with anyone in `playerId`'s alliance. */
+function enemyIdsOfAlliance(gameState: GameState, playerId: string): Set<string> {
+  const enemies = new Set<string>();
+  for (const member of allianceMembers(gameState, playerId)) {
+    for (const other of gameState.players) {
+      if (other.id !== member && areAtWar(gameState, member, other.id)) enemies.add(other.id);
+    }
+  }
+  return enemies;
+}
+
+/** Whether the AI takes an alliance `proposerId` offered it: only if it's actually possible (see
+ *  engine/diplomacy.ts's allianceConflict) and it wouldn't get dragged into a war it can't
+ *  comfortably win - joining means inheriting every war the proposer's alliance is already in, so
+ *  the merged alliance has to out-muscle those new enemies by the same margin the AI demands
+ *  before it starts a war of its own. An alliance that brings no new enemies is always welcome. */
+function aiAcceptsAlliance(gameState: GameState, aiPlayerId: string, proposerId: string, profile: AiDifficultyProfile): boolean {
+  if (allianceConflict(gameState, aiPlayerId, proposerId)) return false;
+  const ownEnemies = enemyIdsOfAlliance(gameState, aiPlayerId);
+  const newEnemies = [...enemyIdsOfAlliance(gameState, proposerId)].filter((id) => !ownEnemies.has(id));
+  if (newEnemies.length === 0) return true;
+  const merged = [...allianceMembers(gameState, aiPlayerId), ...allianceMembers(gameState, proposerId)];
+  return coalitionStrength(gameState, merged) > coalitionStrength(gameState, newEnemies) * profile.warStrengthMargin;
+}
+
 /**
  * Diplomacy pass, run before anything else each AI turn: accepts any non-aggression pact someone
- * has already offered (a pact never hurts and closes off a front), then opportunistically
- * declares war on a bordering rival it clearly outmatches - opening that rival up as an attack
- * target for the military pass below. Declaring war against a pact partner or someone already at
- * war is simply rejected by engine/diplomacy.ts's own validation, so no extra bookkeeping here.
+ * has already offered (a pact never hurts and closes off a front) and any alliance offer it can
+ * safely take on (see aiAcceptsAlliance), then opportunistically declares war on a bordering rival
+ * it clearly outmatches - opening that rival up as an attack target for the military pass below.
+ * The comparison is alliance against alliance, since a war drags in everyone on both sides.
+ * Declaring war against a pact partner, an ally or someone already at war is simply rejected by
+ * engine/diplomacy.ts's own validation, so no extra bookkeeping here.
  */
 function runAiDiplomacy(gameState: GameState, aiPlayerId: string, territories: readonly Territory[]): GameState {
   let state = gameState;
+  const profile = difficultyProfileOf(state, aiPlayerId);
 
   for (const player of state.players) {
     if (player.id === aiPlayerId) continue;
-    if (!hasPendingProposal(state, player.id, aiPlayerId)) continue;
-    const outcome = proposePact(state, aiPlayerId, player.id);
-    if (outcome.ok) state = outcome.gameState;
+    if (hasPendingProposal(state, player.id, aiPlayerId)) {
+      const outcome = proposePact(state, aiPlayerId, player.id);
+      if (outcome.ok) state = outcome.gameState;
+    }
+    if (hasPendingAllianceProposal(state, player.id, aiPlayerId) && aiAcceptsAlliance(state, aiPlayerId, player.id, profile)) {
+      const outcome = proposeAlliance(state, aiPlayerId, player.id);
+      if (outcome.ok) state = outcome.gameState;
+    }
   }
 
-  const profile = difficultyProfileOf(state, aiPlayerId);
-  const myStrength = totalPlayerStrength(state, aiPlayerId);
   for (const rivalId of borderingRivalIds(state, territories, aiPlayerId)) {
-    if (areAtWar(state, aiPlayerId, rivalId)) continue;
-    const rivalStrength = totalPlayerStrength(state, rivalId);
+    if (areAtWar(state, aiPlayerId, rivalId) || areAllied(state, aiPlayerId, rivalId)) continue;
+    const myStrength = coalitionStrength(state, [aiPlayerId]);
+    const rivalStrength = coalitionStrength(state, [rivalId]);
     if (myStrength <= rivalStrength * profile.warStrengthMargin) continue;
     if (Math.random() >= profile.warDeclarationChance) continue;
     const outcome = declareWar(state, aiPlayerId, rivalId);
@@ -184,7 +238,7 @@ function runAiExpansion(gameState: GameState, aiPlayerId: string, territories: r
       const neighborState = state.territoryState.get(neighborId);
       if (!neighborState || neighborState.ownerId === aiPlayerId) return false;
       if (neighborState.ownerId === null) return true;
-      return totalUnits(neighborState.garrison) === 0 && areAtWar(state, aiPlayerId, neighborState.ownerId);
+      return totalUnits(defenderForce(neighborState)) === 0 && areAtWar(state, aiPlayerId, neighborState.ownerId);
     });
     if (!targetId) continue;
 
@@ -271,9 +325,10 @@ function runAiAttacks(gameState: GameState, aiPlayerId: string, territories: rea
     const targetId = fromTerritory.neighbors.find((neighborId) => {
       const neighborState = state.territoryState.get(neighborId);
       if (!neighborState || !neighborState.ownerId || neighborState.ownerId === aiPlayerId) return false;
-      if (totalUnits(neighborState.garrison) === 0) return false;
+      const defenders = defenderForce(neighborState);
+      if (totalUnits(defenders) === 0) return false;
       if (!areAtWar(state, aiPlayerId, neighborState.ownerId)) return false;
-      const theirStrength = battleStrength(neighborState.garrison) * SIMULATED_DEFENSE_MULTIPLIER;
+      const theirStrength = battleStrength(defenders) * SIMULATED_DEFENSE_MULTIPLIER;
       return myStrength > theirStrength * attackStrengthMargin;
     });
     if (!targetId) continue;
@@ -432,12 +487,17 @@ function runAiAirforceInvestment(gameState: GameState, aiPlayerId: string, capit
   let capacityLeft = airfieldCapacity(airfield.level) - totalAircraft(airfield.aircraft);
   if (capacityLeft <= 0 || remaining <= 0) return state;
 
+  // Aircraft are only ever recruited a whole Einheit (AIRCRAFT_PACKET_SIZE = 100 aircraft) at a
+  // time (see recruitAircraft) - round each type's count down to the nearest whole Einheit, same
+  // as the recruit UI's stepper does, rather than the arbitrary count budget/cost math would
+  // otherwise produce (which recruitAircraft would just reject outright).
   const amount: Record<keyof AirComposition, number> = { fighters: 0, cas: 0, bombers: 0 };
   const perTypeBudget = remaining / 3;
   for (const type of ['fighters', 'cas', 'bombers'] as const) {
     if (capacityLeft <= 0) break;
     const perUnitCost = AIRCRAFT_COST_PER_100[type] / 100;
-    const count = Math.min(capacityLeft, Math.floor(perTypeBudget / perUnitCost));
+    const rawCount = Math.min(capacityLeft, Math.floor(perTypeBudget / perUnitCost));
+    const count = Math.floor(rawCount / AIRCRAFT_PACKET_SIZE) * AIRCRAFT_PACKET_SIZE;
     if (count <= 0) continue;
     amount[type] = count;
     capacityLeft -= count;
@@ -520,7 +580,7 @@ export interface AiTurnResult {
  * on doing nothing - any step that finds no good move simply leaves the state untouched. Stops
  * early if an attack opens a battle a human needs to deploy for.
  */
-export function playAiTurn(gameState: GameState, aiPlayerId: string, territories: readonly Territory[]): AiTurnResult {
+export function playAiTurn(gameState: GameState, aiPlayerId: string, territories: readonly Territory[], seaZones: readonly SeaZone[] = []): AiTurnResult {
   let state = gameState;
   state = runAiDiplomacy(state, aiPlayerId, territories);
 
@@ -535,9 +595,176 @@ export function playAiTurn(gameState: GameState, aiPlayerId: string, territories
   // same as every other action below - safe here since the early return above already guarantees
   // there isn't one left over from runAiAttacks.
   state = runAiAirOffense(state, aiPlayerId, territories);
+
+  // Seekrieg: Landungen/Landungsangriffe, Einschiffen, Flotten in Zonen schicken - siehe runAiNaval.
+  const navalResult = runAiNaval(state, aiPlayerId, territories, seaZones);
+  state = navalResult.gameState;
+  if (navalResult.pendingAiDeployment || state.pendingSeaBattle || state.pendingBattle) {
+    return { gameState: state, pendingAiDeployment: navalResult.pendingAiDeployment };
+  }
+
   state = runAiExpansion(state, aiPlayerId, territories);
+  state = runAiShipbuilding(state, aiPlayerId, seaZones);
   state = runAiEconomy(state, aiPlayerId);
   return { gameState: state, pendingAiDeployment: null };
+}
+
+/** Ein Landgebiet an einer Seezone, das die KI dort erobern/besetzen könnte: neutral oder im Krieg befindlicher Feind. */
+function isNavalTarget(state: GameState, aiPlayerId: string, territoryId: string): boolean {
+  const t = state.territoryState.get(territoryId);
+  if (!t || t.ownerId === aiPlayerId) return false;
+  return t.ownerId === null || areAtWar(state, aiPlayerId, t.ownerId);
+}
+
+function zoneHasTargets(state: GameState, aiPlayerId: string, zone: SeaZone): boolean {
+  return zone.neighbors.some((n) => state.territoryState.has(n) && isNavalTarget(state, aiPlayerId, n));
+}
+
+/** Wie attraktiv eine Zone als nächstes Fahrtziel ist: Feind im Krieg > neutral (mit Zielen davor) > eigene Zone mit Zielen. */
+function zoneScore(state: GameState, aiPlayerId: string, zone: SeaZone): number {
+  const z = seaStateOf(state, zone.id);
+  const targets = zoneHasTargets(state, aiPlayerId, zone) ? 2 : 0;
+  if (z.ownerId !== null && z.ownerId !== aiPlayerId) return 4 + targets;
+  if (z.ownerId === null) return 2 + targets;
+  return targets > 0 ? 1 : 0;
+}
+
+/**
+ * Die Marine der KI, in dieser Reihenfolge: (1) Truppen aus Zonen an Land setzen (neutral/unverteidigt) oder bei
+ * Überlegenheit als Landungsangriff; (2) Landeinheiten aus ALLEN angrenzenden eigenen Häfen in eigene Zonen mit
+ * Zielen einschiffen; (3) Flotten schicken: aus Häfen in die attraktivste Zone (Feind im Krieg, sonst neutral),
+ * und Flotten, die in einer Zone ohne Ziele/Truppen liegen, weiter in die nächste interessante Zone. Feindliche Flotten
+ * werden schon ab 3/4 der eigenen Größe angegriffen; Seeschlachten trägt cascadeAiSeaBattle automatisch aus.
+ */
+function runAiNaval(gameState: GameState, aiPlayerId: string, territories: readonly Territory[], seaZones: readonly SeaZone[]): AttackPhaseResult {
+  let state = gameState;
+  if (seaZones.length === 0) return { gameState: state, pendingAiDeployment: null };
+  const margin = difficultyProfileOf(state, aiPlayerId).attackStrengthMargin;
+
+  // (1) Anlanden
+  for (const zone of seaZones) {
+    const z = seaStateOf(state, zone.id);
+    if (z.ownerId !== aiPlayerId) continue;
+    const available = subtractGarrisons(z.embarked, z.embarkedMovedIn);
+    if (totalUnits(available) === 0) continue;
+    // Unverteidigte Ziele zuerst, dann Landungsangriffe.
+    const targets = zone.neighbors.filter((n) => state.territoryState.has(n) && isNavalTarget(state, aiPlayerId, n));
+    targets.sort((a, b) => totalUnits(defenderForce(state.territoryState.get(a)!)) - totalUnits(defenderForce(state.territoryState.get(b)!)));
+    for (const n of targets) {
+      const t = state.territoryState.get(n)!;
+      const defenders = defenderForce(t);
+      if (totalUnits(defenders) === 0) {
+        const out = disembarkUnits(state, aiPlayerId, zone.id, n, available, seaZones);
+        if (out.ok) state = out.gameState;
+        break;
+      }
+      if (battleStrength(available) > defenseStrength(defenders) * margin * 0.75) {
+        const start = startAmphibiousBattle(state, aiPlayerId, zone.id, n, seaZones);
+        if (!start.ok) continue;
+        let s2 = start.gameState;
+        const pending = s2.pendingBattle!;
+        const placements = autoDeployForBattle(pending.attackerMax, pending.subTerritories, 'attacker');
+        s2 = markDeployed(s2, 'attacker');
+        const defender = s2.players.find((p) => p.id === pending.defenderId);
+        if (!defender?.isAI) return { gameState: s2, pendingAiDeployment: { side: 'attacker', placements } };
+        const defPlacements = autoDeployForBattle(pending.defenderMax, pending.subTerritories, 'defender');
+        s2 = markDeployed(s2, 'defender');
+        s2 = beginBattlePhase(s2, placements, defPlacements);
+        return { gameState: cascadeAiBattleTurns(s2, territories), pendingAiDeployment: null };
+      }
+    }
+  }
+
+  // (2) Einschiffen: jeder angrenzende eigene Hafen gibt ab, was verfügbar ist (ein Mann bleibt als Wache zurück).
+  for (const zone of seaZones) {
+    const z = seaStateOf(state, zone.id);
+    if (z.ownerId !== aiPlayerId || z.ships < 1 || !zoneHasTargets(state, aiPlayerId, zone)) continue;
+    for (const n of zone.neighbors) {
+      const t = state.territoryState.get(n);
+      if (!t || t.ownerId !== aiPlayerId) continue;
+      const avail = availableToMove(t);
+      const load = { ...avail, artillery: 0, infantry: Math.max(0, avail.infantry - 1) };
+      if (totalUnits(load) < 1) continue;
+      const out = embarkUnits(state, aiPlayerId, n, zone.id, load, seaZones);
+      if (out.ok) state = out.gameState;
+    }
+  }
+
+  // (3) Flotten schicken (Hafen -> Zone, dann Zone -> Zone)
+  const tryMove = (fromId: string, zone: SeaZone, ships: number): boolean => {
+    const z = seaStateOf(state, zone.id);
+    if (z.ownerId !== null && z.ownerId !== aiPlayerId && z.ships > ships * 1.34) return false;
+    const out = moveShips(state, aiPlayerId, fromId, zone.id, ships, seaZones);
+    if (!out.ok) return false;
+    state = out.gameState;
+    if (state.pendingSeaBattle) state = cascadeAiSeaBattle(state).gameState;
+    return true;
+  };
+  for (const [portId, port] of [...state.territoryState.entries()]) {
+    if (port.ownerId !== aiPlayerId) continue;
+    const ships = availableShips(state, aiPlayerId, portId, seaZones);
+    if (ships <= 0) continue;
+    const options = seaZones
+      .filter((zone) => zone.neighbors.includes(portId) && zoneScore(state, aiPlayerId, zone) >= 2)
+      .sort((a, b) => zoneScore(state, aiPlayerId, b) - zoneScore(state, aiPlayerId, a));
+    for (const zone of options) {
+      if (tryMove(portId, zone, ships)) break;
+      if (state.pendingSeaBattle) return { gameState: state, pendingAiDeployment: null };
+    }
+    if (state.pendingSeaBattle) return { gameState: state, pendingAiDeployment: null };
+  }
+  for (const zone of seaZones) {
+    const z = seaStateOf(state, zone.id);
+    if (z.ownerId !== aiPlayerId) continue;
+    const ships = availableShips(state, aiPlayerId, zone.id, seaZones);
+    // Truppen an Bord oder Ziele in Reichweite: die Flotte bleibt als Transporter/Deckung liegen.
+    if (ships <= 0 || totalUnits(z.embarked) > 0 || zoneHasTargets(state, aiPlayerId, zone)) continue;
+    const options = zone.neighbors
+      .map((id) => seaZones.find((c) => c.id === id))
+      .filter((c): c is SeaZone => c !== undefined && zoneScore(state, aiPlayerId, c) >= 2)
+      .sort((a, b) => zoneScore(state, aiPlayerId, b) - zoneScore(state, aiPlayerId, a));
+    for (const next of options) {
+      if (tryMove(zone.id, next, ships)) break;
+      if (state.pendingSeaBattle) return { gameState: state, pendingAiDeployment: null };
+    }
+    if (state.pendingSeaBattle) return { gameState: state, pendingAiDeployment: null };
+  }
+  return { gameState: state, pendingAiDeployment: null };
+}
+
+/**
+ * Baut Schiffe in den Häfen des Reiches: Zielgröße wächst mit der Zahl der Küstengebiete (6 + 2 je Hafen, höchstens
+ * 24), bezahlt mit einem Anteil des Guthabens je nach Schwierigkeit (easy 30%, medium 50%, hard 65%). Häfen an
+ * Zonen mit Zielen oder Feinden kommen zuerst, die Hauptstadt bevorzugt.
+ */
+function runAiShipbuilding(gameState: GameState, aiPlayerId: string, seaZones: readonly SeaZone[]): GameState {
+  let state = gameState;
+  const ports = [...state.territoryState.entries()]
+    .filter(([id, t]) => t.ownerId === aiPlayerId && isCoastal(id, seaZones))
+    .map(([id]) => id);
+  if (ports.length === 0) return state;
+  const fleetTarget = Math.min(24, 6 + 2 * ports.length);
+  const capitalId = state.players.find((p) => p.id === aiPlayerId)?.capitalId;
+  const rank = (id: string): number => {
+    const zones = coastalZoneIds(id, seaZones).map((zid) => seaZones.find((z) => z.id === zid)!);
+    const best = Math.max(...zones.map((z) => zoneScore(state, aiPlayerId, z)));
+    return best * 10 + (id === capitalId ? 5 : 0);
+  };
+  ports.sort((a, b) => rank(b) - rank(a));
+
+  const fraction = { easy: 0.3, medium: 0.5, hard: 0.65 }[state.players.find((p) => p.id === aiPlayerId)?.aiDifficulty ?? 'medium'];
+  let budget = Math.floor(((state.resources.get(aiPlayerId) ?? 0) * fraction) / SHIP_COST);
+  let missing = fleetTarget - totalShips(state, aiPlayerId);
+  for (const id of ports) {
+    if (budget <= 0 || missing <= 0) break;
+    const count = Math.min(budget, missing, 8);
+    const out = recruitShips(state, aiPlayerId, id, count, seaZones);
+    if (!out.ok) continue;
+    state = out.gameState;
+    budget -= count;
+    missing -= count;
+  }
+  return state;
 }
 
 /** How many of the front-most rows (0 = the row right at the frontier) a deployment may draw
@@ -1007,6 +1234,76 @@ export function playAiBattleMoves(gameState: GameState, territories: readonly Te
   return state;
 }
 
+/** Ab dieser Kampfrunde bietet die KI von sich aus ein Unentschieden an (wenn aiWantsDraw gilt). */
+const AI_DRAW_OFFER_MIN_ROUND = 10;
+
+/** Alle Einheiten eines Spielers auf dem taktischen Schlachtfeld. */
+function unitsOnBattlefield(pending: PendingBattle, ownerId: string): UnitComposition {
+  let total: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 };
+  for (const cell of pending.subState?.values() ?? []) {
+    if (cell.ownerId === ownerId) {
+      total = {
+        infantry: total.infantry + cell.garrison.infantry,
+        lightTank: total.lightTank + cell.garrison.lightTank,
+        heavyTank: total.heavyTank + cell.garrison.heavyTank,
+        artillery: total.artillery + cell.garrison.artillery,
+        motorizedInfantry: total.motorizedInfantry + cell.garrison.motorizedInfantry,
+      };
+    }
+  }
+  return total;
+}
+
+/**
+ * Die Unentschieden-Heuristik der KI: keine Seite hat noch Artillerie auf dem Feld (sie könnte aus der Ferne noch
+ * etwas bewegen) UND der Angreifer kann den Verteidiger nicht mehr schlagen, ohne selbst zu verlieren, gemessen als
+ * Angreifer-Stärke <= Verteidiger-Stärke auf dem Schlachtfeld (battleStrength der jeweils noch vorhandenen Einheiten).
+ */
+export function aiWantsDraw(pending: PendingBattle): boolean {
+  if (!pending.subState) return false;
+  const attacker = unitsOnBattlefield(pending, pending.attackerId);
+  const defender = unitsOnBattlefield(pending, pending.defenderId);
+  if (attacker.artillery > 0 || defender.artillery > 0) return false;
+  return battleStrength(attacker) <= battleStrength(defender);
+}
+
+/**
+ * Das Unentschieden-Verhalten der KI-Seite `aiId` in einem laufenden Kampf: nimmt ein Angebot des Gegners an, wenn
+ * aiWantsDraw gilt; bietet von sich aus eins an (`mayOffer`), wenn aiWantsDraw gilt und der Kampf mindestens
+ * AI_DRAW_OFFER_MIN_ROUND Runden läuft. Nutzt dieselbe Engine-Aktion wie der Button der Menschen (proposeBattleDraw).
+ * `concluded` ist gesetzt, wenn dadurch (beidseitige Zustimmung) die Schlacht endete.
+ */
+export function aiHandleDraw(
+  gameState: GameState,
+  aiId: string,
+  mayOffer: boolean,
+): { readonly gameState: GameState; readonly concluded: BattleResult | null } {
+  const pending = gameState.pendingBattle;
+  if (!pending?.subState || !aiWantsDraw(pending)) return { gameState, concluded: null };
+  const isAttacker = pending.attackerId === aiId;
+  if (!isAttacker && pending.defenderId !== aiId) return { gameState, concluded: null };
+  const alreadyOffered = isAttacker ? pending.attackerDrawOffer : pending.defenderDrawOffer;
+  const opponentOffered = isAttacker ? pending.defenderDrawOffer : pending.attackerDrawOffer;
+  if (alreadyOffered) return { gameState, concluded: null };
+  if (!opponentOffered && !(mayOffer && pending.battleRound >= AI_DRAW_OFFER_MIN_ROUND)) return { gameState, concluded: null };
+  const out = proposeBattleDraw(gameState, aiId);
+  return out.ok ? { gameState: out.gameState, concluded: out.concluded } : { gameState, concluded: null };
+}
+
+/** Nach einer Aktion eines Menschen (z.B. seinem Unentschieden-Angebot): lässt jede beteiligte KI darauf reagieren. */
+export function respondAiToDrawOffers(gameState: GameState): { readonly gameState: GameState; readonly concluded: BattleResult | null } {
+  const pending = gameState.pendingBattle;
+  if (!pending) return { gameState, concluded: null };
+  let state = gameState;
+  for (const id of [pending.attackerId, pending.defenderId]) {
+    if (!state.players.find((p) => p.id === id)?.isAI) continue;
+    const out = aiHandleDraw(state, id, false);
+    state = out.gameState;
+    if (out.concluded) return out;
+  }
+  return { gameState: state, concluded: null };
+}
+
 /** Hard cap on AI-vs-AI battle-turns before forceConcludeBattle steps in - generous (a real fight
  *  concludes in a handful of turns), just a safety net against a heuristic stalemate. */
 const MAX_AI_VS_AI_BATTLE_TURNS = 300;
@@ -1033,6 +1330,8 @@ export function cascadeAiBattleTurns(gameState: GameState, territories: readonly
       state.pendingBattle.activeSide === 'attacker' ? state.pendingBattle.attackerId : state.pendingBattle.defenderId;
     const activePlayer = state.players.find((p) => p.id === activeId);
     if (!activePlayer?.isAI) break;
+    state = aiHandleDraw(state, activeId, true).gameState;
+    if (!state.pendingBattle) break;
     state = playAiBattleMoves(state, territories);
     if (!state.pendingBattle) break;
     const outcome = endBattleTurn(state, activeId, territories);

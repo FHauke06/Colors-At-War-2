@@ -1,5 +1,6 @@
 import type { AirComposition, AirfieldState, GameState, Territory, UnitComposition } from './types';
 import { areAtWar } from './diplomacy';
+import { defenderForce, setDefenderForce } from './movement';
 import { isAirUnlocked } from './research';
 import { developmentAt } from './economy';
 
@@ -28,12 +29,20 @@ export function subtractAircraft(a: AirComposition, b: AirComposition): AirCompo
   return { fighters: a.fighters - b.fighters, cas: a.cas - b.cas, bombers: a.bombers - b.bombers };
 }
 
-/** Rüstungspunkte per 100 aircraft - Jäger and CAS are cheap enough to field in bulk, Bomber
- *  raids are a serious investment. */
+/** Aircraft are only ever bought a whole "Einheit" at a time - 100 real aircraft per Einheit (see
+ *  recruitAircraft, which rejects anything that isn't a multiple of this). Exported so
+ *  ui/GameScreen.ts's recruit stepper can move in the same increments rather than 1 at a time -
+ *  buying in smaller steps used to let airCostOf's fractional rounding sell aircraft absurdly
+ *  cheap (e.g. 4 Jäger for 1 Punkt instead of the intended ~20/100 ratio). */
+export const AIRCRAFT_PACKET_SIZE = 100;
+
+/** Rüstungspunkte per Einheit (AIRCRAFT_PACKET_SIZE = 100 aircraft) - Jäger and CAS are cheap
+ *  enough to field in bulk, Bomber raids are a serious investment. */
 export const AIRCRAFT_COST_PER_100: AirComposition = { fighters: 20, cas: 30, bombers: 200 };
 
 /** Ceil'd so a fight is never decided by a fractional Rüstungspunkt - same convention as
- *  engine/combat.ts's defenseStrength. */
+ *  engine/combat.ts's defenseStrength. Divides evenly in practice since recruitAircraft only ever
+ *  accepts whole multiples of AIRCRAFT_PACKET_SIZE; the ceil is just a safety net. */
 export function airCostOf(amount: AirComposition): number {
   const raw =
     (amount.fighters * AIRCRAFT_COST_PER_100.fighters +
@@ -59,8 +68,9 @@ export const CAS_STRIKE_DAMAGE_PER_UNIT = 10;
 
 export const AIRFIELD_BUILD_COST = 15;
 export const AIRFIELD_UPGRADE_COST = 10;
-/** Each level adds this many aircraft of capacity - level 1 holds 2, level 2 holds 4, etc. */
-export const AIRFIELD_CAPACITY_PER_LEVEL = 2;
+/** Each level adds this many aircraft of capacity - 2 Einheiten (AIRCRAFT_PACKET_SIZE = 100 each,
+ *  so 200 aircraft) at level 1, 400 at level 2, etc. */
+export const AIRFIELD_CAPACITY_PER_LEVEL = 2 * AIRCRAFT_PACKET_SIZE;
 
 export function airfieldAt(gameState: GameState, territoryId: string): AirfieldState {
   return gameState.airfields.get(territoryId) ?? EMPTY_AIRFIELD;
@@ -76,7 +86,7 @@ export type AirforceOutcome =
 
 /** Builds a level-1 Flugplatz at an owned territory that doesn't already have one. */
 export function buildAirfield(gameState: GameState, playerId: string, territoryId: string): AirforceOutcome {
-  if (gameState.pendingBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
 
   const state = gameState.territoryState.get(territoryId);
@@ -96,7 +106,7 @@ export function buildAirfield(gameState: GameState, playerId: string, territoryI
 
 /** Raises an existing Flugplatz by one level, raising its capacity by AIRFIELD_CAPACITY_PER_LEVEL. */
 export function upgradeAirfield(gameState: GameState, playerId: string, territoryId: string): AirforceOutcome {
-  if (gameState.pendingBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
 
   const state = gameState.territoryState.get(territoryId);
@@ -124,13 +134,20 @@ export function recruitAircraft(
   territoryId: string,
   amount: AirComposition,
 ): AirforceOutcome {
-  if (gameState.pendingBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
 
   const state = gameState.territoryState.get(territoryId);
   if (!state || state.ownerId !== playerId) return { ok: false, reason: 'Das Gebiet gehört dir nicht.' };
   if (amount.fighters < 0 || amount.cas < 0 || amount.bombers < 0) return { ok: false, reason: 'Ungültige Anzahl.' };
   if (totalAircraft(amount) === 0) return { ok: false, reason: 'Keine Flugzeuge ausgewählt.' };
+  if (
+    amount.fighters % AIRCRAFT_PACKET_SIZE !== 0 ||
+    amount.cas % AIRCRAFT_PACKET_SIZE !== 0 ||
+    amount.bombers % AIRCRAFT_PACKET_SIZE !== 0
+  ) {
+    return { ok: false, reason: `Flugzeuge werden nur in Einheiten zu je ${AIRCRAFT_PACKET_SIZE} gekauft.` };
+  }
 
   for (const type of ['fighters', 'cas', 'bombers'] as const) {
     if (amount[type] > 0 && !isAirUnlocked(gameState, playerId, type)) {
@@ -363,7 +380,7 @@ export function launchBomberRaid(
   mode: BomberRaidMode,
   territories: readonly Territory[],
 ): BomberRaidOutcome {
-  if (gameState.pendingBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
   if (bomberCount <= 0) return { ok: false, reason: 'Keine Bomber ausgewählt.' };
   if (fromTerritoryId === targetTerritoryId) return { ok: false, reason: 'Ziel muss ein anderes Gebiet sein.' };
@@ -425,11 +442,12 @@ export function launchBomberRaid(
   // returning bombers would otherwise always round down to no effect at all. Guarantee at least 1
   // full strength point whenever any bomber actually made it through.
   const damageDealt = bombersReturned > 0 ? Math.max(1, bombersReturned * BOMBER_DAMAGE_PER_UNIT) : 0;
+  // Everything standing there takes the hit, allied guests included (see TerritoryState.guests).
   const nextTerritoryState = new Map(gameState.territoryState);
-  nextTerritoryState.set(targetTerritoryId, {
-    ...targetState,
-    garrison: reduceGarrisonByStrength(targetState.garrison, damageDealt),
-  });
+  nextTerritoryState.set(
+    targetTerritoryId,
+    setDefenderForce(targetState, reduceGarrisonByStrength(defenderForce(targetState), damageDealt), false),
+  );
 
   return {
     ok: true,
@@ -474,7 +492,7 @@ export function fighterSweep(
   fighterCount: number,
   territories: readonly Territory[],
 ): FighterSweepOutcome {
-  if (gameState.pendingBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
   if (fighterCount <= 0) return { ok: false, reason: 'Keine Jäger ausgewählt.' };
   if (fromTerritoryId === targetTerritoryId) return { ok: false, reason: 'Ziel muss ein anderes Gebiet sein.' };

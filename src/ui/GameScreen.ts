@@ -1,5 +1,5 @@
-import type { AirComposition, AirTech, BattlePlacement, BattleSubTerritory, CalledAircraft, GameState, GroundTech, PendingBattle, SupportTech, TerritoryData, UnitComposition } from '../engine/types';
-import { totalUnits, availableToMove, addGarrisons, subtractGarrisons } from '../engine/movement';
+import type { AirComposition, AirTech, BattlePlacement, BattleSubTerritory, CalledAircraft, GameState, GroundTech, NavalTech, PendingBattle, Player, SupportTech, TerritoryData, UnitComposition } from '../engine/types';
+import { totalUnits, availableToMove, addGarrisons, subtractGarrisons, stackOf, defenderForce } from '../engine/movement';
 import { isEliminated, isGameOver, gameWinner, territoryStandings, remainingPlayers } from '../engine/victory';
 import { statsFor, totalTroopsFor, totalFactoriesFor } from '../engine/stats';
 import {
@@ -11,12 +11,28 @@ import {
   FACTORY_COST,
   INFRASTRUCTURE_COST,
   MAX_INFRASTRUCTURE_LEVEL,
+  SHIP_COST,
+  MAX_SHIPS_PER_STACK,
+  isCoastal,
 } from '../engine/economy';
+import { seaStateOf, availableShips, isSeaZoneId } from '../engine/naval';
+import type { SeaBattleResult } from '../engine/naval';
+import { renderSeaBattleView } from './SeaBattleView';
 import { battleStrength, GRID_SIZE, MAX_BATTLE_ROUNDS, ARTILLERY_RANGE, NUKE_USE_COST, SIMULATED_DEFENSE_MULTIPLIER, STRENGTH, subTerritoryDistance, battleAirSuperiority } from '../engine/combat';
 import type { BattleResult } from '../engine/combat';
-import { areAtWar, getRelation, hasPendingProposal } from '../engine/diplomacy';
+import {
+  PACT_COOLDOWN_ROUNDS,
+  allianceConflict,
+  alliesOf,
+  areAllied,
+  areAtWar,
+  getRelation,
+  hasPendingAllianceProposal,
+  hasPendingProposal,
+} from '../engine/diplomacy';
 import {
   AIRCRAFT_COST_PER_100,
+  AIRCRAFT_PACKET_SIZE,
   AIRFIELD_BUILD_COST,
   AIRFIELD_UPGRADE_COST,
   CAS_MIN_AIR_SUPERIORITY,
@@ -32,23 +48,38 @@ import {
   territoryDistance,
 } from '../engine/airforce';
 import type { BomberRaidMode } from '../engine/airforce';
-import { GROUND_TECH_TREE, AIR_TECH_TREE, SUPPORT_TECH_TREE, isGroundUnlocked, isAirUnlocked, isSupportUnlocked } from '../engine/research';
+import { GROUND_TECH_TREE, AIR_TECH_TREE, SUPPORT_TECH_TREE, NAVAL_TECH_TREE, isGroundUnlocked, isAirUnlocked, isSupportUnlocked, isNavalUnlocked } from '../engine/research';
 import { MapRenderer } from '../render/MapRenderer';
 import { UNIT_ICON_PATHS, UNIT_LABELS, UNIT_TYPES } from '../render/unitIcons';
 import { AIRCRAFT_ICON_PATHS, AIRCRAFT_LABELS, AIRCRAFT_TYPES } from '../render/aircraftIcons';
+import { SHIP_ICON_PATH } from '../render/shipIcons';
 import { TERRAIN_ICON_PATHS } from '../render/terrainIcons';
 import type { GameClient } from '../net/GameClient';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
+type Tab = 'map' | 'resources' | 'diplomacy' | 'airforce' | 'naval' | 'research';
+
 const MAP_HINT =
-  'Ziehe Einheiten auf ein angrenzendes Gebiet, um sie zu verschieben oder ein verteidigtes fremdes Gebiet anzugreifen (erfordert Krieg - klicke die Namenskachel eines Spielers oben für Diplomatie). Klicke ein eigenes Gebiet an, um dort Einheiten zu rekrutieren.';
+  'Ziehe Einheiten auf ein angrenzendes Gebiet, um sie zu verschieben oder ein verteidigtes fremdes Gebiet anzugreifen (erfordert Krieg - klicke die Namenskachel eines Spielers oben für Diplomatie). Auf Gebieten von Verbündeten dürfen deine Einheiten mit stehen und sie durchqueren. Klicke ein eigenes Gebiet an, um dort Einheiten zu rekrutieren. Zahlen: eigene Einheiten grün, verbündete blau mit "F" davor (z. B. 5/F3).';
 const RESOURCE_HINT =
   'Zeigt, wie viele Rüstungspunkte jedes Gebiet pro Runde einbringt (heller/wärmer = mehr). Klicke ein eigenes Gebiet an, um dort Fabriken zu bauen oder die Infrastruktur auszubauen.';
 const DIPLOMACY_HINT =
-  'Zeigt deinen diplomatischen Status: eigene Gebiete grün, verbündete (aktiver Nichtangriffspakt) blau, Gebiete im Krieg rot, unbesetzte Gebiete grau. Andere Gebiete (Frieden ohne Pakt) sind gedämpft grau-blau.';
+  'Zeigt deinen diplomatischen Status: eigene Gebiete grün, Verbündete (Allianz) blau, Gebiete mit aktivem Nichtangriffspakt violett, Gebiete im Krieg rot, unbesetzte Gebiete grau. Andere Gebiete (Frieden ohne Pakt) sind gedämpft grau-blau. Klicke ein Land an, um seine Verbündeten zu sehen - Verbündete sehen alle Einheiten der anderen, ziehen automatisch in jeden Krieg eines Mitglieds und dürfen mit ihren Einheiten gemeinsam auf denselben Gebieten stehen.';
+
+/** Outline colors the Diplomatie tab draws around the clicked country's territories and around its
+ *  allies' territories (see GameScreen.renderDiplomacyFocus) - both picked to stay visible on top of
+ *  every fill that view uses (green/blue/violet/red/grey). */
+const DIPLOMACY_FOCUS_STROKE = '#fbbf24'; // amber-400, same as the main map's selection outline
+const DIPLOMACY_ALLY_STROKE = '#67e8f9'; // cyan-300
+/** Thicker than the main map's single-territory selection outline (0.3): this one rings a whole
+ *  group of territories at once and has to stay readable at a glance, not just mark one. */
+const DIPLOMACY_FOCUS_STROKE_WIDTH = '2';
+const DIPLOMACY_ALLY_STROKE_WIDTH = '1.5';
 const AIRFORCE_HINT =
   'Färbt jedes Gebiet nach dem Verhältnis der dort projizierten Jäger statt nach Besitzer: grün = vollständig deine Luftüberlegenheit, rot = vollständig feindliche, grau = keine Jäger von niemandem in Reichweite. Flugplätze zeigen zusätzlich ihre Stufe und stationierten Flugzeuge als Icons. Klicke ein eigenes Gebiet an, um dort einen Flugplatz zu bauen/auszubauen, Flugzeuge zu rekrutieren oder einen Bomber-/Jägereinsatz zu starten - oder ziehe ein Flugplatz-Gebiet direkt auf ein feindliches Ziel.';
+const NAVAL_HINT =
+  'Marine: wie im Karten-Tab, nur mit Schiffen. Klicke ein eigenes Küstengebiet an (Schiffe bauen, Auswahl), ziehe es auf eine angrenzende Seezone, um Schiffe fahren zu lassen und Landeinheiten einzuschiffen (nur in einer alleinig besetzten Zone mit eigenem Schiff). Zone auf Zone verlegt Schiffe (feindliche Zone im Krieg = Seeschlacht), Zone auf Küstengebiet setzt Truppen in der Folgerunde an Land - auf ein verteidigtes Feindgebiet als Landungsangriff. Schiffe brauchen Research > Marine.';
 const RESEARCH_HINT =
   'Schalte neue Einheiten- und Flugzeugtypen für Rüstungspunkte frei - Infanterie ist von Anfang an verfügbar. Manche Technologien setzen eine andere voraus. Fahre mit der Maus über eine Technologie, um ihre Werte zu sehen.';
 
@@ -61,13 +92,17 @@ const GROUND_TECH_STATS: Record<GroundTech, string> = {
 
 /** Hover-tooltip text for each researchable aircraft type - see engine/research.ts's AIR_TECH_TREE. */
 const AIR_TECH_STATS: Record<AirTech, string> = {
-  fighters: `Rekrutierung: ${AIRCRAFT_COST_PER_100.fighters} Pkt./100 — kämpft um Luftüberlegenheit (Basis-Killrate ${FIGHTER_BASE_KILL_RATE} pro Jäger, quadratisch mit eigener Überzahl)`,
-  cas: `Rekrutierung: ${AIRCRAFT_COST_PER_100.cas} Pkt./100 — ${CAS_STRIKE_DAMAGE_PER_UNIT} Schaden pro Einsatz (1 Einheit besiegt 10 Infanterie) — nur einsetzbar über ${Math.round(CAS_MIN_AIR_SUPERIORITY * 100)}% Luftüberlegenheit`,
-  bombers: `Rekrutierung: ${AIRCRAFT_COST_PER_100.bombers} Pkt./100 — Rückkehrquote entspricht der eigenen Luftüberlegenheit am Ziel. Wähle beim Angriff das Ziel: Einheiten (100 Bomber = ${Math.round(100 * BOMBER_DAMAGE_PER_UNIT)} Stärke) oder Fabriken (100 Bomber = ${Math.round(100 * FACTORY_DAMAGE_PER_BOMBER)} Fabriken)`,
+  fighters: `Rekrutierung: ${AIRCRAFT_COST_PER_100.fighters} Pkt. pro Einheit (${AIRCRAFT_PACKET_SIZE} Flugzeuge) — kämpft um Luftüberlegenheit (Basis-Killrate ${FIGHTER_BASE_KILL_RATE} pro Jäger, quadratisch mit eigener Überzahl)`,
+  cas: `Rekrutierung: ${AIRCRAFT_COST_PER_100.cas} Pkt. pro Einheit (${AIRCRAFT_PACKET_SIZE} Flugzeuge) — ${CAS_STRIKE_DAMAGE_PER_UNIT} Schaden pro Einsatz (1 Flugzeug besiegt 10 Infanterie) — nur einsetzbar über ${Math.round(CAS_MIN_AIR_SUPERIORITY * 100)}% Luftüberlegenheit`,
+  bombers: `Rekrutierung: ${AIRCRAFT_COST_PER_100.bombers} Pkt. pro Einheit (${AIRCRAFT_PACKET_SIZE} Flugzeuge) — Rückkehrquote entspricht der eigenen Luftüberlegenheit am Ziel. Wähle beim Angriff das Ziel: Einheiten (100 Bomber = ${Math.round(100 * BOMBER_DAMAGE_PER_UNIT)} Stärke) oder Fabriken (100 Bomber = ${Math.round(100 * FACTORY_DAMAGE_PER_BOMBER)} Fabriken)`,
 };
 
 /** Support weapons don't fit the ground/air split - see engine/research.ts's SUPPORT_TECH_TREE. */
 const SUPPORT_TECH_LABELS: Record<SupportTech, string> = { artillery: UNIT_LABELS.artillery, nuke: 'Atombombe' };
+const NAVAL_TECH_LABELS: Record<NavalTech, string> = { ships: 'Schiffe' };
+const NAVAL_TECH_STATS: Record<NavalTech, string> = {
+  ships: `Schiffe werden in Küstengebieten rekrutiert (${SHIP_COST} Pkt. pro Schiff) und besetzen Seezonen. Im Seekampf (Schiffe versenken) ist jedes Schiff genau 1 Kasten. Nur wer eine Seezone alleinig besetzt und dort mindestens 1 Schiff liegen hat, kann Landeinheiten überseetransportieren.`,
+};
 
 /** Hover-tooltip text for engine/research.ts's SUPPORT_TECH_TREE. */
 const SUPPORT_TECH_STATS: Record<SupportTech, string> = {
@@ -99,6 +134,16 @@ function createUnitIcon(type: keyof UnitComposition, className = 'h-3.5 w-3.5 sh
   svg.setAttribute('aria-hidden', 'true');
   svg.classList.add(...className.split(' '));
   svg.innerHTML = UNIT_ICON_PATHS[type];
+  return svg;
+}
+
+function createShipIcon(className = 'h-3.5 w-3.5 shrink-0'): SVGSVGElement {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('fill', 'currentColor');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.classList.add(...className.split(' '));
+  svg.innerHTML = SHIP_ICON_PATH;
   return svg;
 }
 
@@ -162,8 +207,22 @@ interface BattleGridOptions {
   readonly getColor: (t: BattleSubTerritory) => string;
   readonly getContent: (t: BattleSubTerritory) => TileContent;
   readonly isInteractive: (t: BattleSubTerritory) => boolean;
-  readonly onClick?: (t: BattleSubTerritory) => void;
-  readonly onRightClick?: (t: BattleSubTerritory) => void;
+  /** shiftKey lets a caller step in bulk (e.g. the deployment phase places/removes 10 at once
+   *  instead of 1) - see MapRenderer-style click/drag callers that don't need it just ignore it. */
+  readonly onClick?: (t: BattleSubTerritory, shiftKey: boolean) => void;
+  readonly onRightClick?: (t: BattleSubTerritory, shiftKey: boolean) => void;
+  /** Optional press-drag-release gesture, mirroring the main map's drag-to-move (see
+   *  MapRenderer's onDragStart/onDragEnd): pointerdown on a tile canDrag allows starts a drag;
+   *  releasing back on the same tile still resolves as a plain click (via onClick), releasing on
+   *  a different tile calls onDrop instead. Leave both unset to keep a tile click-only, as
+   *  deployment/spectator views do. */
+  readonly canDrag?: (t: BattleSubTerritory) => boolean;
+  readonly onDrop?: (fromId: string, toId: string) => void;
+  /** Called after any eligible drag concludes without landing on the source tile itself (i.e.
+   *  whenever onDrop fires, and also when the drag is released outside any valid tile) - a chance
+   *  to resync visual state setDragVisual touched but doesn't own, e.g. a persistent selection
+   *  ring on a field that's still selected after an invalid or aborted drop. */
+  readonly onDragSettle?: () => void;
 }
 
 export class GameScreen {
@@ -181,6 +240,7 @@ export class GameScreen {
   private readonly diplomacyTabBtn: HTMLButtonElement;
   private readonly airforceTabBtn: HTMLButtonElement;
   private readonly researchTabBtn: HTMLButtonElement;
+  private readonly navalTabBtn: HTMLButtonElement;
   private readonly notificationStack: HTMLDivElement;
   private readonly normalView: HTMLDivElement;
   private readonly tacticalView: HTMLDivElement;
@@ -192,7 +252,7 @@ export class GameScreen {
   private readonly client: GameClient;
   private readonly unsubscribers: (() => void)[] = [];
   private currentGameState: GameState;
-  private activeTab: 'map' | 'resources' | 'diplomacy' | 'airforce' | 'research' = 'map';
+  private activeTab: Tab = 'map';
   /** Targets this player has just declared war on themselves (set right at the button click, read
    *  and consumed by the very next render's notification diff) - without this, that same war
    *  declaration would show up as if the target had declared war on THEM instead. See
@@ -205,12 +265,18 @@ export class GameScreen {
    *  still works exactly like before. */
   private selectedMoveSourceId: string | null = null;
   private currentMoveSelectionPanel: { getSelectedAmount: () => UnitComposition } | null = null;
+  /** Marine-Tab: das geöffnete Schiffs-/Truppen-Auswahlpanel (siehe handleNavalClick). */
+  private currentNavalPanel: { getSelection: () => { readonly ships: number; readonly units: UnitComposition } } | null = null;
   /** The territory-development modal, if one's open - refreshed on every state update so building
    *  a factory or upgrading infrastructure doesn't require re-clicking the territory each time. */
   private currentDevelopmentPanel: { readonly refresh: () => void } | null = null;
   /** The diplomacy modal, if one's open - refreshed on every state update, same reasoning as
    *  currentDevelopmentPanel. */
   private currentDiplomacyPanel: { readonly refresh: () => void } | null = null;
+  /** The player whose country was last clicked in the Diplomatie tab - their allies are listed in
+   *  a side panel and outlined on the map (see renderDiplomacyFocus). Null when nothing's selected;
+   *  cleared by closeMoveSelection, which every tab switch already goes through. */
+  private diplomacyFocusOwnerId: string | null = null;
   /** The Flugplatz-Verwaltung modal, if one's open - refreshed on every state update, same
    *  reasoning as currentDevelopmentPanel. */
   private currentAirforcePanel: { readonly refresh: () => void } | null = null;
@@ -265,11 +331,15 @@ export class GameScreen {
     this.airforceTabBtn.type = 'button';
     this.airforceTabBtn.textContent = 'Airforce';
     this.airforceTabBtn.addEventListener('click', () => this.setTab('airforce'));
+    this.navalTabBtn = document.createElement('button');
+    this.navalTabBtn.type = 'button';
+    this.navalTabBtn.textContent = 'Marine';
+    this.navalTabBtn.addEventListener('click', () => this.setTab('naval'));
     this.researchTabBtn = document.createElement('button');
     this.researchTabBtn.type = 'button';
     this.researchTabBtn.textContent = 'Research';
     this.researchTabBtn.addEventListener('click', () => this.setTab('research'));
-    tabRow.append(this.mapTabBtn, this.resourceTabBtn, this.diplomacyTabBtn, this.airforceTabBtn, this.researchTabBtn);
+    tabRow.append(this.mapTabBtn, this.resourceTabBtn, this.diplomacyTabBtn, this.airforceTabBtn, this.navalTabBtn, this.researchTabBtn);
 
     this.notificationStack = document.createElement('div');
     this.notificationStack.className =
@@ -318,45 +388,74 @@ export class GameScreen {
       canDrag: (territoryId) => {
         if (isGameOver(this.currentGameState)) return false;
         if (this.currentGameState.activePlayerId !== client.playerId) return false;
+        if (this.currentGameState.pendingSeaBattle) return false;
+        // Marine-Tab: nur Wasser-Bewegungen (Schiffe fahren, Truppen ein-/ausschiffen, Landungsangriff).
+        if (this.activeTab === 'naval') {
+          const gs = this.currentGameState;
+          if (isSeaZoneId(this.data.seaZones, territoryId)) {
+            const z = seaStateOf(gs, territoryId);
+            return z.ownerId === client.playerId && (z.ships - z.shipsMovedIn > 0 || totalUnits(subtractGarrisons(z.embarked, z.embarkedMovedIn)) > 0);
+          }
+          const st = gs.territoryState.get(territoryId);
+          if (!st || st.ownerId !== client.playerId || !isCoastal(territoryId, this.data.seaZones)) return false;
+          return availableShips(gs, client.playerId, territoryId, this.data.seaZones) > 0 || totalUnits(availableToMove(st)) > 0;
+        }
         const state = this.currentGameState.territoryState.get(territoryId);
-        if (!state || state.ownerId !== client.playerId) return false;
+        if (!state) return false;
 
         // Jäger and Bomber are draggable onto a target the same way ground units are, to attack
         // it directly (fighterSweep/launchBomberRaid) without opening a tactical battle - see
-        // handleAirforceDrop.
+        // handleAirforceDrop. They belong to the territory's own Flugplatz, so only its owner.
         if (this.activeTab === 'airforce') {
+          if (state.ownerId !== client.playerId) return false;
           const airfield = airfieldAt(this.currentGameState, territoryId);
           return airfield.aircraft.fighters > 0 || airfield.aircraft.bombers > 0;
         }
         if (this.activeTab !== 'map') return false;
-        return totalUnits(state.garrison) - totalUnits(state.movedIn) > 0;
+        // Ground units may be picked up wherever they stand: on the player's own territory, or on
+        // an ally's where they're stationed as guests.
+        const stack = stackOf(state, client.playerId);
+        return !!stack && totalUnits(stack.garrison) - totalUnits(stack.movedIn) > 0;
       },
       onDrop: (fromId, toId) => {
         if (this.activeTab === 'airforce') {
           this.handleAirforceDrop(fromId, toId);
           return;
         }
+        // Alles, was Wasser berührt (Schiffe fahren, Truppen ein-/ausschiffen, Landungsangriff), läuft im Marine-Tab über ein Menü.
+        if (this.activeTab === 'naval') {
+          if (isSeaZoneId(this.data.seaZones, fromId) || isSeaZoneId(this.data.seaZones, toId)) this.handleNavalDrop(fromId, toId);
+          else this.showError('Im Marine-Tab bewegst du Schiffe und Truppen über Wasser - Landbewegungen gehen im Karten-Tab.');
+          return;
+        }
         const toState = this.currentGameState.territoryState.get(toId);
-        const isEnemyOccupied = !!toState && toState.ownerId !== null && toState.ownerId !== client.playerId;
+        // An ally's ground isn't enemy ground: dropping there moves in beside them (see moveUnits).
+        const isEnemyOccupied =
+          !!toState &&
+          toState.ownerId !== null &&
+          toState.ownerId !== client.playerId &&
+          !areAllied(this.currentGameState, client.playerId, toState.ownerId);
         if (isEnemyOccupied && !areAtWar(this.currentGameState, client.playerId, toState!.ownerId!)) {
           this.showError('Kein Kriegszustand - erst den Krieg erklären, bevor angegriffen oder erobert werden kann.');
           return;
         }
-        const isAttack = isEnemyOccupied && totalUnits(toState!.garrison) > 0;
+        const isAttack = isEnemyOccupied && totalUnits(defenderForce(toState!)) > 0;
         if (isAttack) {
           this.openAttackChoiceMenu(fromId, toId);
           return;
         }
         const fromState = this.currentGameState.territoryState.get(fromId);
-        if (!fromState) return;
+        const fromStack = fromState ? stackOf(fromState, client.playerId) : null;
+        if (!fromStack) return;
         const amount =
           this.selectedMoveSourceId === fromId && this.currentMoveSelectionPanel
             ? this.currentMoveSelectionPanel.getSelectedAmount()
-            : availableToMove(fromState);
+            : availableToMove(fromStack);
         this.client.moveUnits(fromId, toId, amount);
         this.closeMoveSelection();
       },
     });
+    this.map.setSeaInteractive(false);
     this.map.setClickHandler((territoryId) => this.handleTerritoryClick(territoryId));
 
     this.unsubscribers.push(client.onGameState((gameState) => this.render(gameState)));
@@ -453,12 +552,16 @@ export class GameScreen {
     supportBtn.type = 'button';
     supportBtn.textContent = 'Support';
     supportBtn.className = secondaryBtnClass;
-    subTabRow.append(groundBtn, airBtn, supportBtn);
+    const navalBtn = document.createElement('button');
+    navalBtn.type = 'button';
+    navalBtn.textContent = 'Marine';
+    navalBtn.className = secondaryBtnClass;
+    subTabRow.append(groundBtn, airBtn, supportBtn, navalBtn);
 
     const grid = document.createElement('div');
     grid.className = 'grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3';
 
-    let subTab: 'ground' | 'air' | 'support' = 'ground';
+    let subTab: 'ground' | 'air' | 'support' | 'naval' = 'ground';
 
     const refresh = (): void => {
       grid.replaceChildren();
@@ -499,6 +602,23 @@ export class GameScreen {
             }),
           );
         }
+      } else if (subTab === 'naval') {
+        for (const tech of ['ships'] as const) {
+          const def = NAVAL_TECH_TREE[tech];
+          grid.appendChild(
+            this.buildTechCard({
+              icon: createShipIcon('h-5 w-5 shrink-0'),
+              label: NAVAL_TECH_LABELS[tech],
+              cost: def.cost,
+              requiresLabel: null,
+              statsText: NAVAL_TECH_STATS[tech],
+              unlocked: isNavalUnlocked(this.currentGameState, myId, tech),
+              prereqMet: true,
+              canAfford: points >= def.cost,
+              onUnlock: () => this.client.unlockNavalTech(tech),
+            }),
+          );
+        }
       } else {
         for (const tech of ['artillery', 'nuke'] as const) {
           const def = SUPPORT_TECH_TREE[tech];
@@ -519,16 +639,18 @@ export class GameScreen {
       }
     };
 
-    const activateTab = (tab: 'ground' | 'air' | 'support'): void => {
+    const activateTab = (tab: 'ground' | 'air' | 'support' | 'naval'): void => {
       subTab = tab;
       groundBtn.className = tab === 'ground' ? primaryBtnClass : secondaryBtnClass;
       airBtn.className = tab === 'air' ? primaryBtnClass : secondaryBtnClass;
       supportBtn.className = tab === 'support' ? primaryBtnClass : secondaryBtnClass;
+      navalBtn.className = tab === 'naval' ? primaryBtnClass : secondaryBtnClass;
       refresh();
     };
     groundBtn.addEventListener('click', () => activateTab('ground'));
     airBtn.addEventListener('click', () => activateTab('air'));
     supportBtn.addEventListener('click', () => activateTab('support'));
+    navalBtn.addEventListener('click', () => activateTab('naval'));
 
     el.append(subTabRow, grid);
     return { el, refresh };
@@ -560,9 +682,16 @@ export class GameScreen {
       const otherId = a === myId ? b : b === myId ? a : null;
       if (!otherId) continue;
       if (previous.diplomacy.relations.get(key)?.atWar) continue; // already at war, nothing new
-      if (this.myRecentWarDeclarations.delete(otherId)) continue; // that was my own declaration
       const other = next.players.find((p) => p.id === otherId);
       const name = `${other?.name ?? 'Ein Spieler'}${other?.isAI ? ' (KI)' : ''}`;
+      // A war that exists only because an alliance joined it (see engine/diplomacy.ts's
+      // propagateAllianceWars) was never declared by or against this pair directly - so it's neither
+      // "my own declaration" nor worth phrasing as someone declaring war on me.
+      if (relation.viaAlliance) {
+        this.pushNotification(`Bündnisfall: Du bist jetzt mit ${name} im Krieg.`, 'war');
+        continue;
+      }
+      if (this.myRecentWarDeclarations.delete(otherId)) continue; // that was my own declaration
       this.pushNotification(`${name} hat dir den Krieg erklärt!`, 'war');
     }
 
@@ -573,6 +702,27 @@ export class GameScreen {
       const from = next.players.find((p) => p.id === fromId);
       const name = `${from?.name ?? 'Ein Spieler'}${from?.isAI ? ' (KI)' : ''}`;
       this.pushNotification(`${name} bietet dir einen Nichtangriffspakt an.`, 'pact');
+    }
+
+    // Alliance offers are keyed the same way as pact offers, so a newly-appeared one addressed to
+    // this player can likewise only have come from someone else. The other half of the flow - an
+    // AI (or another human) taking *my* offer - shows up as the alliance itself appearing while my
+    // own offer was still pending in the previous state.
+    for (const key of next.diplomacy.allianceProposals) {
+      if (previous.diplomacy.allianceProposals.has(key)) continue;
+      const [fromId, toId] = key.split('->');
+      if (toId !== myId) continue;
+      const from = next.players.find((p) => p.id === fromId);
+      const name = `${from?.name ?? 'Ein Spieler'}${from?.isAI ? ' (KI)' : ''}`;
+      this.pushNotification(`${name} bietet dir eine Allianz an.`, 'pact');
+    }
+    for (const key of previous.diplomacy.allianceProposals) {
+      const [fromId, toId] = key.split('->');
+      if (fromId !== myId || !toId) continue;
+      if (!areAllied(next, myId, toId) || areAllied(previous, myId, toId)) continue;
+      const other = next.players.find((p) => p.id === toId);
+      const name = `${other?.name ?? 'Ein Spieler'}${other?.isAI ? ' (KI)' : ''}`;
+      this.pushNotification(`${name} hat dein Bündnisangebot angenommen.`, 'pact');
     }
   }
 
@@ -624,13 +774,15 @@ export class GameScreen {
     setTimeout(() => toast.remove(), 10000);
   }
 
-  private setTab(tab: 'map' | 'resources' | 'diplomacy' | 'airforce' | 'research'): void {
+  private setTab(tab: Tab): void {
     this.activeTab = tab;
     this.mapTabBtn.className = tab === 'map' ? primaryBtnClass : secondaryBtnClass;
     this.resourceTabBtn.className = tab === 'resources' ? primaryBtnClass : secondaryBtnClass;
     this.diplomacyTabBtn.className = tab === 'diplomacy' ? primaryBtnClass : secondaryBtnClass;
     this.airforceTabBtn.className = tab === 'airforce' ? primaryBtnClass : secondaryBtnClass;
     this.researchTabBtn.className = tab === 'research' ? primaryBtnClass : secondaryBtnClass;
+    this.navalTabBtn.className = tab === 'naval' ? primaryBtnClass : secondaryBtnClass;
+    this.map.setSeaInteractive(tab === 'naval');
     this.hint.textContent =
       tab === 'map'
         ? MAP_HINT
@@ -640,14 +792,16 @@ export class GameScreen {
             ? DIPLOMACY_HINT
             : tab === 'airforce'
               ? AIRFORCE_HINT
-              : RESEARCH_HINT;
+              : tab === 'naval'
+                ? NAVAL_HINT
+                : RESEARCH_HINT;
     // Research isn't tied to any one territory (unlike the other tabs, which recolor the map) -
     // it replaces the map/move-selection row entirely with its own tech-tree panel instead.
     this.mapRow.classList.toggle('hidden', tab === 'research');
     this.researchPanel.el.classList.toggle('hidden', tab !== 'research');
     this.researchPanel.el.classList.toggle('flex', tab === 'research');
     if (tab === 'map') {
-      this.map.applyGameState(this.currentGameState);
+      this.map.applyGameState(this.currentGameState, this.client.playerId);
     } else if (tab === 'resources') {
       this.closeMoveSelection();
       this.map.applyResourceView(this.currentGameState, this.data.territories);
@@ -657,6 +811,9 @@ export class GameScreen {
     } else if (tab === 'airforce') {
       this.closeMoveSelection();
       this.map.applyAirforceView(this.currentGameState, this.data.territories, this.client.playerId);
+    } else if (tab === 'naval') {
+      this.closeMoveSelection();
+      this.map.applyNavalView(this.currentGameState, this.client.playerId);
     } else {
       this.closeMoveSelection();
       this.researchPanel.refresh();
@@ -668,18 +825,22 @@ export class GameScreen {
     this.detectAirSupportNotifications(this.currentGameState, gameState);
     this.currentGameState = gameState;
     if (this.activeTab === 'map') {
-      this.map.applyGameState(gameState);
+      this.map.applyGameState(gameState, this.client.playerId);
     } else if (this.activeTab === 'resources') {
       // Resource values are no longer static (factories change them), so this tab needs to
       // refresh on every state update too, not just when the player switches onto it.
       this.map.applyResourceView(gameState, this.data.territories);
     } else if (this.activeTab === 'diplomacy') {
-      // Relations shift mid-game (a war declared, a pact formed) - refresh live like the other tabs.
+      // Relations shift mid-game (a war declared, a pact or alliance formed) - refresh live like
+      // the other tabs, including the clicked country's ally list/outlines if one is open.
       this.map.applyDiplomacyView(gameState, this.client.playerId);
+      if (this.diplomacyFocusOwnerId) this.renderDiplomacyFocus();
     } else if (this.activeTab === 'airforce') {
       // Airfield levels/stationed aircraft (and the Jäger-ratio coloring they drive) change
       // mid-game too - refresh live like the other tabs.
       this.map.applyAirforceView(gameState, this.data.territories, this.client.playerId);
+    } else if (this.activeTab === 'naval') {
+      this.map.applyNavalView(gameState, this.client.playerId);
     } else {
       // Newly-affordable/unlocked techs change mid-game too - refresh live like the other tabs.
       this.researchPanel.refresh();
@@ -695,7 +856,7 @@ export class GameScreen {
     this.turnStatus.textContent = `Runde ${gameState.turn} — ${
       isMyTurn ? 'Du bist am Zug' : `${activePlayer?.name ?? '?'} ist am Zug`
     } — ${myPoints} Rüstungspunkte`;
-    this.endTurnBtn.disabled = !isMyTurn || gameState.pendingBattle !== null || gameOver;
+    this.endTurnBtn.disabled = !isMyTurn || gameState.pendingBattle !== null || gameState.pendingSeaBattle !== null || gameOver;
 
     this.legend.replaceChildren();
     for (const player of gameState.players) {
@@ -720,6 +881,7 @@ export class GameScreen {
       if (!isSelf && !eliminated) {
         const relation = getRelation(gameState, this.client.playerId, player.id);
         if (relation.atWar) relationSuffix = ' · Krieg';
+        else if (relation.allied) relationSuffix = ' · Allianz';
         else if (relation.pact?.active) relationSuffix = ' · Pakt';
       }
       const statusSuffix = eliminated ? ' — ausgeschieden' : relationSuffix;
@@ -897,6 +1059,27 @@ export class GameScreen {
    *  - subState is "fully visible to both, and to anyone else watching" per its own doc comment -
    *  they get a live, read-only view of the same grid instead of just a passive banner. */
   private handlePendingBattle(gameState: GameState): void {
+    const sea = gameState.pendingSeaBattle;
+    if (sea) {
+      this.battleWaitingBanner.classList.add('hidden');
+      this.normalView.classList.add('hidden');
+      this.tacticalView.classList.remove('hidden');
+      this.closeMoveSelection();
+      renderSeaBattleView(this.tacticalView, {
+        pending: sea,
+        zoneName: this.data.seaZones.find((z) => z.id === sea.zoneId)?.name ?? sea.zoneId,
+        players: gameState.players,
+        viewerId: this.client.playerId,
+        onDeploy: (cells) => this.client.deploySeaFleet(cells),
+        onShoot: (cell) => this.client.seaShoot(cell),
+        onCancel: () => this.client.cancelSeaBattle(),
+        onProposeSimulation: () => this.client.proposeSeaSimulation(),
+        onDeclineSimulation: () => this.client.declineSeaSimulation(),
+        primaryBtnClass,
+        secondaryBtnClass,
+      });
+      return;
+    }
     const pending = gameState.pendingBattle;
     if (!pending) {
       this.battleWaitingBanner.classList.add('hidden');
@@ -938,7 +1121,7 @@ export class GameScreen {
 
   private appendBattleHeader(pending: PendingBattle): void {
     const territoryName = this.data.territories.find((t) => t.id === pending.territoryId)?.name ?? pending.territoryId;
-    const fromName = this.data.territories.find((t) => t.id === pending.fromId)?.name ?? pending.fromId;
+    const fromName = this.mapName(pending.fromId);
     const attacker = this.currentGameState.players.find((p) => p.id === pending.attackerId);
     const defender = this.currentGameState.players.find((p) => p.id === pending.defenderId);
 
@@ -1081,7 +1264,7 @@ export class GameScreen {
 
     const info = document.createElement('p');
     info.className = 'text-center text-sm text-slate-300';
-    info.textContent = 'Klicke auf deine Felder, um Einheiten zu platzieren - Rechtsklick nimmt sie zurück.';
+    info.textContent = 'Klicke auf deine Felder, um Einheiten zu platzieren - Rechtsklick nimmt sie zurück. Shift+Klick platziert bzw. entfernt 10 auf einmal.';
     const cityInfo = document.createElement('p');
     cityInfo.className = 'text-center text-xs text-yellow-400';
     cityInfo.textContent =
@@ -1154,20 +1337,22 @@ export class GameScreen {
         return { kind: 'composition', total: amount, available: amount };
       },
       isInteractive: (t) => t.side === role && !t.isEscape,
-      onClick: (t) => {
+      onClick: (t, shiftKey) => {
         if (t.side !== role || t.isEscape || remaining[selectedType] <= 0) return;
-        remaining[selectedType] -= 1;
+        const step = Math.min(shiftKey ? 10 : 1, remaining[selectedType]);
+        remaining[selectedType] -= step;
         const current = placements.get(t.id) ?? emptyComposition();
-        placements.set(t.id, { ...current, [selectedType]: current[selectedType] + 1 });
+        placements.set(t.id, { ...current, [selectedType]: current[selectedType] + step });
         refreshTile(t.id);
         refreshAll();
       },
-      onRightClick: (t) => {
+      onRightClick: (t, shiftKey) => {
         if (t.side !== role || t.isEscape) return;
         const current = placements.get(t.id);
         if (!current || current[selectedType] <= 0) return;
-        const updated = { ...current, [selectedType]: current[selectedType] - 1 };
-        remaining[selectedType] += 1;
+        const step = Math.min(shiftKey ? 10 : 1, current[selectedType]);
+        const updated = { ...current, [selectedType]: current[selectedType] - step };
+        remaining[selectedType] += step;
         if (totalUnits(updated) === 0) placements.delete(t.id);
         else placements.set(t.id, updated);
         refreshTile(t.id);
@@ -1230,11 +1415,12 @@ export class GameScreen {
     airSupportBtn.className = secondaryBtnClass;
     const nukeUnlocked = isSupportUnlocked(this.currentGameState, myId, 'nuke');
     const myPoints = this.currentGameState.resources.get(myId) ?? 0;
+    const myNukeStockpile = this.currentGameState.nukeStockpiles.get(myId);
     const nukeBtn = document.createElement('button');
     nukeBtn.type = 'button';
-    nukeBtn.textContent = 'Atombombe einsetzen';
+    nukeBtn.textContent = myNukeStockpile !== undefined ? `Atombombe einsetzen (${myNukeStockpile} übrig)` : 'Atombombe einsetzen';
     nukeBtn.className = `${secondaryBtnClass}${nukeUnlocked ? '' : ' hidden'}`;
-    nukeBtn.disabled = !isMyBattleTurn || myPoints < NUKE_USE_COST;
+    nukeBtn.disabled = !isMyBattleTurn || myPoints < NUKE_USE_COST || myNukeStockpile === 0;
     nukeBtn.addEventListener('click', () => this.openNukeConfirm());
     const endBattleTurnBtn = document.createElement('button');
     endBattleTurnBtn.type = 'button';
@@ -1242,7 +1428,17 @@ export class GameScreen {
     endBattleTurnBtn.className = primaryBtnClass;
     endBattleTurnBtn.disabled = !isMyBattleTurn;
     endBattleTurnBtn.addEventListener('click', () => this.client.endBattleTurn());
-    actionBtns.append(bombardBtn, airSupportBtn, nukeBtn, endBattleTurnBtn);
+    // Unentschieden: jederzeit in der Kampfphase, unabhängig vom Zug; beide Seiten müssen zustimmen.
+    const myDrawOffered = amAttacker ? !!pending.attackerDrawOffer : !!pending.defenderDrawOffer;
+    const enemyDrawOffered = amAttacker ? !!pending.defenderDrawOffer : !!pending.attackerDrawOffer;
+    const drawBtn = document.createElement('button');
+    drawBtn.type = 'button';
+    drawBtn.textContent = myDrawOffered ? 'Unentschieden angeboten...' : enemyDrawOffered ? 'Unentschieden annehmen' : 'Unentschieden anbieten';
+    drawBtn.className = enemyDrawOffered && !myDrawOffered ? primaryBtnClass : secondaryBtnClass;
+    drawBtn.title = 'Beide Seiten müssen zustimmen - die Schlacht endet dann unverändert: keine Gebiete wechseln, der Restbestand beider Seiten bleibt.';
+    drawBtn.disabled = myDrawOffered;
+    drawBtn.addEventListener('click', () => this.client.proposeBattleDraw());
+    actionBtns.append(bombardBtn, airSupportBtn, nukeBtn, drawBtn, endBattleTurnBtn);
     statusRow.append(statusText, actionBtns);
     this.tacticalView.appendChild(statusRow);
 
@@ -1367,6 +1563,17 @@ export class GameScreen {
       updateHighlights();
     };
     casArmedCancelBtn.addEventListener('click', () => armCasStrike(null));
+    // Shared by the click flow (select a field, then click a neighbor) and the drag flow (press a
+    // field, drag straight onto a neighbor) below - both end up moving/attacking the same way.
+    const executeMove = (fromSubId: string, toSubId: string, amount: UnitComposition): void => {
+      const targetIsEscape = pending.subTerritories.find((t) => t.id === toSubId)?.isEscape ?? false;
+      selected = null;
+      selectionPanel.hide();
+      updateHighlights();
+      if (totalUnits(amount) === 0) return;
+      if (targetIsEscape) this.openEscapeMenu(pending, fromSubId, amount);
+      else this.client.battleMove(fromSubId, toSubId, amount);
+    };
     const onTileClick = (subId: string): void => {
       if (casStrikeTarget) {
         if (isValidCasStrikeTarget(subId)) {
@@ -1396,15 +1603,7 @@ export class GameScreen {
         return;
       }
       if (selected && neighborsOf(selected).includes(subId)) {
-        const fromSubId = selected;
-        const amount = selectionPanel.getSelectedAmount();
-        const targetIsEscape = pending.subTerritories.find((t) => t.id === subId)?.isEscape ?? false;
-        selected = null;
-        selectionPanel.hide();
-        updateHighlights();
-        if (totalUnits(amount) === 0) return;
-        if (targetIsEscape) this.openEscapeMenu(pending, fromSubId, amount);
-        else this.client.battleMove(fromSubId, subId, amount);
+        executeMove(selected, subId, selectionPanel.getSelectedAmount());
         return;
       }
       if (canSelect(subId)) {
@@ -1456,6 +1655,15 @@ export class GameScreen {
       // order, not a battle-turn action) - every other interaction still requires isMyBattleTurn.
       isInteractive: () => isMyBattleTurn || casStrikeTarget !== null,
       onClick: (t) => onTileClick(t.id),
+      // Dragging only drives plain movement/attack, same as the main map - bombard and an armed
+      // CAS strike stay click-only since their targets aren't limited to neighbors.
+      canDrag: (t) => !bombardMode && !casStrikeTarget && canSelect(t.id),
+      onDrop: (fromId, toId) => {
+        if (!neighborsOf(fromId).includes(toId)) return;
+        const amount = selected === fromId ? selectionPanel.getSelectedAmount() : availableAt(fromId);
+        executeMove(fromId, toId, amount);
+      },
+      onDragSettle: () => updateHighlights(),
     });
     tileEls = tiles;
     mainCol.appendChild(grid);
@@ -1468,7 +1676,7 @@ export class GameScreen {
       ? ` Mit "Beschießen" feuert deine gesamte verfügbare Artillerie eines Feldes auf ein feindliches Feld mit Infanterie bis zu ${ARTILLERY_RANGE} Felder entfernt (rot markiert) - kein Nachbarfeld nötig, aber sie wehrt sich dabei nicht selbst.`
       : '';
     legendRow.textContent =
-      `Klicke ein eigenes Feld mit verfügbaren Einheiten an - rechts kannst du einzelne Einheiten abwählen, danach klicke ein angrenzendes Ziel (auch diagonal).${artilleryHint} Mit "Luftunterstützung" rufst du Jäger oder CAS von Flugplätzen auf dem umkämpften oder einem angrenzenden Gebiet - Jäger kommen nach 1 Runde, CAS nach 3 und darf erst gerufen werden, wenn über 50% der Jäger in der Schlacht deine sind. Die goldenen Felder am oberen und unteren Rand führen zurück auf die Hauptkarte.`;
+      `Ziehe ein eigenes Feld mit verfügbaren Einheiten direkt auf ein angrenzendes Ziel (auch diagonal), um es zu bewegen oder anzugreifen - oder klicke es erst an, um rechts einzelne Einheiten abzuwählen, und klicke danach das Ziel.${artilleryHint} Mit "Luftunterstützung" rufst du Jäger oder CAS von Flugplätzen auf dem umkämpften oder einem angrenzenden Gebiet - Jäger kommen nach 1 Runde, CAS nach 3 und darf erst gerufen werden, wenn über 50% der Jäger in der Schlacht deine sind. Die goldenen Felder am oberen und unteren Rand führen zurück auf die Hauptkarte.`;
     this.tacticalView.appendChild(legendRow);
   }
 
@@ -1485,6 +1693,28 @@ export class GameScreen {
 
     const tiles = new Map<string, HTMLDivElement>();
     const byId = new Map<string, BattleSubTerritory>();
+
+    // Drag state for the optional press-drag-release gesture (see canDrag/onDrop on
+    // BattleGridOptions) - mirrors MapRenderer's onDragStart/onDragEnd, including why click and
+    // drag share one pointerdown/pointerup pair instead of also registering a native 'click'
+    // listener: once setPointerCapture is in play, whether a native click still fires afterwards
+    // isn't reliably predictable across browsers.
+    let dragSourceId: string | null = null;
+    let dragEligible = false;
+    const tileAtPoint = (x: number, y: number): string | null => {
+      const el = document.elementFromPoint(x, y);
+      const tileEl = el instanceof HTMLElement ? el.closest<HTMLElement>('[data-sub-id]') : null;
+      return tileEl?.dataset.subId ?? null;
+    };
+    const setDragVisual = (sourceId: string, on: boolean): void => {
+      const sourceTile = tiles.get(sourceId);
+      if (sourceTile) sourceTile.style.boxShadow = on ? 'inset 0 0 0 2px #fbbf24' : 'none';
+      for (const neighborId of byId.get(sourceId)?.neighbors ?? []) {
+        const neighborTile = tiles.get(neighborId);
+        if (neighborTile) neighborTile.style.boxShadow = on ? 'inset 0 0 0 2px rgba(251,191,36,0.6)' : 'none';
+      }
+    };
+
     const refreshTile = (subId: string): void => {
       const t = byId.get(subId);
       const tile = tiles.get(subId);
@@ -1533,11 +1763,49 @@ export class GameScreen {
         tile.style.outlineOffset = '-2px';
       }
       if (t.terrain === 'normal') {
-        if (options.onClick) tile.addEventListener('click', () => options.onClick!(t));
+        if (options.canDrag && options.onDrop) {
+          tile.addEventListener('pointerdown', (e) => {
+            dragSourceId = t.id;
+            dragEligible = options.canDrag!(t);
+            if (!dragEligible) return;
+            e.preventDefault();
+            (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+            setDragVisual(t.id, true);
+          });
+          tile.addEventListener('pointerup', (e) => {
+            if (!dragSourceId) return;
+            const sourceId = dragSourceId;
+            const wasEligible = dragEligible;
+            if (wasEligible) setDragVisual(sourceId, false);
+            const targetId = tileAtPoint(e.clientX, e.clientY);
+            dragSourceId = null;
+            dragEligible = false;
+            if (targetId === sourceId) {
+              options.onClick?.(t, e.shiftKey);
+            } else if (wasEligible) {
+              // Covers both a genuine drop (valid or not - onDrop itself decides) and a release
+              // outside any tile (targetId null) - either way, setDragVisual just cleared a ring
+              // that may still belong to unrelated persistent state (e.g. a click-selected field
+              // being dragged again), so the caller gets a chance to resync via onDragSettle.
+              if (targetId) options.onDrop!(sourceId, targetId);
+              options.onDragSettle?.();
+            }
+          });
+          tile.addEventListener('pointercancel', () => {
+            if (dragSourceId && dragEligible) {
+              setDragVisual(dragSourceId, false);
+              options.onDragSettle?.();
+            }
+            dragSourceId = null;
+            dragEligible = false;
+          });
+        } else if (options.onClick) {
+          tile.addEventListener('click', (e) => options.onClick!(t, e.shiftKey));
+        }
         if (options.onRightClick) {
           tile.addEventListener('contextmenu', (e) => {
             e.preventDefault();
-            options.onRightClick!(t);
+            options.onRightClick!(t, e.shiftKey);
           });
         }
       }
@@ -2002,7 +2270,11 @@ export class GameScreen {
       const territory = this.data.territories.find((t) => t.id === id);
       const state = this.currentGameState.territoryState.get(id);
       const defended =
-        !!state && state.ownerId !== null && state.ownerId !== this.client.playerId && totalUnits(state.garrison) > 0;
+        !!state &&
+        state.ownerId !== null &&
+        state.ownerId !== this.client.playerId &&
+        !areAllied(this.currentGameState, this.client.playerId, state.ownerId) &&
+        totalUnits(defenderForce(state)) > 0;
       const owner = state?.ownerId ? this.currentGameState.players.find((p) => p.id === state.ownerId) : undefined;
       return { id, name: territory?.name ?? id, defended, ownerName: owner?.name ?? null };
     });
@@ -2088,11 +2360,14 @@ export class GameScreen {
    *  straight off the button click like bombardBattleCell/moveBattleUnits do. */
   private openNukeConfirm(): void {
     const { card, close } = this.openModal('Atombombe einsetzen?');
+    const stockpile = this.currentGameState.nukeStockpiles.get(this.client.playerId);
     const warning = document.createElement('p');
     warning.className = 'text-sm text-slate-200';
     warning.textContent =
       `Zerstört sofort ALLE Einheiten in dieser Schlacht - auch deine eigenen - und beendet den Kampf ohne Sieger. ` +
-      `Kostet ${NUKE_USE_COST} Rüstungspunkte. Das kann nicht rückgängig gemacht werden.`;
+      `Kostet ${NUKE_USE_COST} Rüstungspunkte.` +
+      (stockpile !== undefined ? ` Verbraucht 1 von ${stockpile} verbleibenden Sprengköpfen.` : '') +
+      ` Das kann nicht rückgängig gemacht werden.`;
     card.appendChild(warning);
 
     const cancelBtn = document.createElement('button');
@@ -2118,15 +2393,36 @@ export class GameScreen {
 
   /** A lightweight "the battle is over" notice - the fight itself was watched live on the
    *  tactical map, so this is just the final tally, not a replay. */
-  private showBattleConcluded(battle: BattleResult): void {
-    const territoryName = this.data.territories.find((t) => t.id === battle.territoryId)?.name ?? battle.territoryId;
+  private showBattleConcluded(battle: BattleResult | SeaBattleResult): void {
+    const territoryName = this.mapName(battle.territoryId);
     const attacker = this.currentGameState.players.find((p) => p.id === battle.attackerId);
     const defender = this.currentGameState.players.find((p) => p.id === battle.defenderId);
 
-    const { card, close } = this.openModal(`Kampf um ${territoryName} entschieden`);
+    if ('sea' in battle) {
+      const { card, close } = this.openModal(`Seeschlacht um ${territoryName} entschieden`);
+      const text = document.createElement('p');
+      text.className = 'text-sm font-semibold text-slate-100';
+      text.textContent = battle.attackerWon
+        ? `${attacker?.name ?? 'Der Angreifer'} hat die Flotte von ${defender?.name ?? 'dem Verteidiger'} versenkt und besetzt ${territoryName}!`
+        : `${defender?.name ?? 'Der Verteidiger'} hat den Angriff von ${attacker?.name ?? 'dem Angreifer'} abgewehrt und hält ${territoryName}!`;
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.textContent = 'Schließen';
+      closeBtn.className = primaryBtnClass;
+      closeBtn.addEventListener('click', () => close());
+      const actions = document.createElement('div');
+      actions.className = 'flex justify-end pt-2';
+      actions.appendChild(closeBtn);
+      card.append(text, actions);
+      return;
+    }
+
+    const { card, close } = this.openModal(`Kampf um ${territoryName} ${battle.draw ? 'beendet' : 'entschieden'}`);
     const verdict = document.createElement('p');
     verdict.className = 'text-sm font-semibold text-slate-100';
-    verdict.textContent = battle.nuked
+    verdict.textContent = battle.draw
+      ? `Unentschieden: ${attacker?.name ?? 'Der Angreifer'} und ${defender?.name ?? 'der Verteidiger'} haben den Kampf um ${territoryName} beendet - kein Gebiet wechselt den Besitzer, alle verbleibenden Einheiten bleiben erhalten.`
+      : battle.nuked
       ? `Eine Atombombe hat alle Streitkräfte von ${attacker?.name ?? 'dem Angreifer'} und ${defender?.name ?? 'dem Verteidiger'} in ${territoryName} ausgelöscht - niemand hat das Gebiet erobert.`
       : battle.attackerWon
         ? `${attacker?.name ?? 'Der Angreifer'} hat ${defender?.name ?? 'den Verteidiger'} besiegt und erobert ${territoryName}!`
@@ -2191,9 +2487,11 @@ export class GameScreen {
     // using the same available-to-move force the simulation would actually commit. Only meaningful
     // for the simulate option; the tactical battle is played out by hand, not rolled.
     const fromState = this.currentGameState.territoryState.get(fromId);
+    const fromStack = fromState ? stackOf(fromState, this.client.playerId) : null;
     const toState = this.currentGameState.territoryState.get(toId);
-    const attackerStrength = fromState ? battleStrength(availableToMove(fromState)) : 0;
-    const defenderStrength = toState ? battleStrength(toState.garrison) * SIMULATED_DEFENSE_MULTIPLIER : 0;
+    const attackerStrength = fromStack ? battleStrength(availableToMove(fromStack)) : 0;
+    // The whole defending force: the owner's garrison plus any allied guests standing with it.
+    const defenderStrength = toState ? battleStrength(defenderForce(toState)) * SIMULATED_DEFENSE_MULTIPLIER : 0;
     const totalStrength = attackerStrength + defenderStrength;
     const winChance = totalStrength > 0 ? attackerStrength / totalStrength : 0;
     const winPercent = Math.round(winChance * 100);
@@ -2263,8 +2561,13 @@ export class GameScreen {
    *  (same table as the tactical grid) instead of jumping straight to recruiting. Dragging that
    *  same territory afterward sends whatever's checked; recruiting now lives behind its own
    *  button next to the table. Clicking the already-selected territory again closes it. */
+  /** Name eines Land- oder Seegebiets. */
+  private mapName(id: string): string {
+    return this.data.territories.find((t) => t.id === id)?.name ?? this.data.seaZones.find((z) => z.id === id)?.name ?? id;
+  }
+
   private handleTerritoryClick(territoryId: string): void {
-    if (this.currentGameState.pendingBattle) return;
+    if (this.currentGameState.pendingBattle || this.currentGameState.pendingSeaBattle) return;
     if (isGameOver(this.currentGameState)) return;
     if (this.activeTab === 'resources') {
       this.handleResourceTerritoryClick(territoryId);
@@ -2274,9 +2577,19 @@ export class GameScreen {
       this.handleAirforceTerritoryClick(territoryId);
       return;
     }
+    if (this.activeTab === 'diplomacy') {
+      this.handleDiplomacyTerritoryClick(territoryId);
+      return;
+    }
+    if (this.activeTab === 'naval') {
+      this.handleNavalClick(territoryId);
+      return;
+    }
     if (this.activeTab !== 'map') return;
     const state = this.currentGameState.territoryState.get(territoryId);
-    if (!state || state.ownerId !== this.client.playerId) return;
+    // Either the player's own territory or one of an ally's where their units are stationed.
+    const stack = state ? stackOf(state, this.client.playerId) : null;
+    if (!state || !stack) return;
     if (this.currentGameState.activePlayerId !== this.client.playerId) return;
 
     if (this.selectedMoveSourceId === territoryId) {
@@ -2284,31 +2597,431 @@ export class GameScreen {
       return;
     }
 
+    const isGuest = state.ownerId !== this.client.playerId;
     this.selectedMoveSourceId = territoryId;
     this.map.setSelectedTerritory(territoryId);
     const territoryName = this.data.territories.find((t) => t.id === territoryId)?.name ?? territoryId;
     const panel = this.buildUnitSelectionPanel({
-      title: territoryName,
-      hint: 'Ziehe dieses Gebiet auf ein angrenzendes Ziel, um die markierten Einheiten zu bewegen oder anzugreifen.',
+      title: isGuest ? `${territoryName} (bei Verbündeten)` : territoryName,
+      hint: isGuest
+        ? 'Deine Einheiten stehen hier als Gast. Ziehe dieses Gebiet auf ein angrenzendes Ziel, um die markierten Einheiten zu bewegen oder anzugreifen.'
+        : 'Ziehe dieses Gebiet auf ein angrenzendes Ziel, um die markierten Einheiten zu bewegen oder anzugreifen.',
     });
-    panel.showFor(availableToMove(state));
+    panel.showFor(availableToMove(stack));
     this.currentMoveSelectionPanel = panel;
 
-    const recruitBtn = document.createElement('button');
-    recruitBtn.type = 'button';
-    recruitBtn.textContent = 'Hier rekrutieren';
-    recruitBtn.className = `${secondaryBtnClass} w-full`;
-    recruitBtn.addEventListener('click', () => this.openRecruitMenu(territoryId));
-    panel.el.appendChild(recruitBtn);
+    if (!isGuest) {
+      const recruitBtn = document.createElement('button');
+      recruitBtn.type = 'button';
+      recruitBtn.textContent = 'Hier rekrutieren';
+      recruitBtn.className = `${secondaryBtnClass} w-full`;
+      recruitBtn.addEventListener('click', () => this.openRecruitMenu(territoryId));
+      panel.el.appendChild(recruitBtn);
+    }
 
     this.moveSelectionSlot.replaceChildren(panel.el);
+  }
+
+  /**
+   * Marine-Tab, Klick - wie der Klick auf ein Gebiet im Karten-Tab: öffnet das Auswahl-Panel mit den verfügbaren Schiffen
+   * (und den Landeinheiten, die dort ein-/ausgeschifft werden können) als einzeln abwählbare Zeilen. Eigene
+   * Küstengebiete haben zusätzlich "Hier Schiffe bauen". Danach das Gebiet auf ein angrenzendes Ziel ziehen
+   * (handleNavalDrop). Erneutes Klicken schließt das Panel.
+   */
+  private handleNavalClick(id: string): void {
+    const gs = this.currentGameState;
+    const me = this.client.playerId;
+    const zones = this.data.seaZones;
+    if (gs.activePlayerId !== me) return;
+    if (this.selectedMoveSourceId === id) {
+      this.closeMoveSelection();
+      return;
+    }
+    const isZone = isSeaZoneId(zones, id);
+    const st = gs.territoryState.get(id);
+    const ownPort = !isZone && !!st && st.ownerId === me && isCoastal(id, zones);
+    if (!isZone && !ownPort) return;
+    const ships = availableShips(gs, me, id, zones);
+    let units = emptyComposition();
+    if (isZone) {
+      const z = seaStateOf(gs, id);
+      if (z.ownerId !== me) return;
+      units = subtractGarrisons(z.embarked, z.embarkedMovedIn);
+    } else {
+      const stack = stackOf(st!, me);
+      if (stack) units = availableToMove(stack);
+    }
+
+    this.closeMoveSelection();
+    this.selectedMoveSourceId = id;
+    this.map.setSelectedTerritory(id);
+    const panel = this.buildNavalSelectionPanel(this.mapName(id), ships, units, ownPort);
+    this.currentNavalPanel = panel;
+    if (ownPort) {
+      const recruitBtn = document.createElement('button');
+      recruitBtn.type = 'button';
+      recruitBtn.textContent = 'Hier Schiffe bauen';
+      recruitBtn.className = `${secondaryBtnClass} w-full`;
+      recruitBtn.addEventListener('click', () => this.openShipRecruitMenu(id));
+      panel.el.appendChild(recruitBtn);
+    }
+    this.moveSelectionSlot.replaceChildren(panel.el);
+  }
+
+  /**
+   * Das Auswahl-Panel des Marine-Tabs (gleiche Gestalt wie buildUnitSelectionPanel): zuerst die verfügbaren Schiffe, dann
+   * die Landeinheiten, jeweils als einzeln an-/abwählbare Zeilen. Alles startet ausgewählt.
+   */
+  private buildNavalSelectionPanel(
+    title: string,
+    ships: number,
+    units: UnitComposition,
+    isPort: boolean,
+  ): { el: HTMLDivElement; getSelection: () => { readonly ships: number; readonly units: UnitComposition } } {
+    const el = document.createElement('div');
+    el.className =
+      'fixed right-4 top-56 z-30 flex max-h-[65vh] w-72 max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto rounded-md border border-amber-500/50 bg-amber-500/10 p-3 shadow-lg shadow-slate-950/50';
+    const titleEl = document.createElement('div');
+    titleEl.className = 'text-center text-xs font-semibold uppercase tracking-wide text-amber-400';
+    titleEl.textContent = title;
+
+    type Row = { readonly key: string; readonly kind: 'ship' | keyof UnitComposition };
+    const rows: Row[] = [
+      ...Array.from({ length: ships }, (_, i): Row => ({ key: `ship-${i}`, kind: 'ship' })),
+      ...UNIT_TYPES.flatMap((type) => Array.from({ length: units[type] }, (_, i): Row => ({ key: `${type}-${i}`, kind: type }))),
+    ];
+    let selected = new Set(rows.map((r) => r.key));
+    const list = document.createElement('div');
+    list.className = 'flex max-h-64 flex-col gap-1 overflow-y-auto';
+    const summary = document.createElement('div');
+    summary.className = 'text-center text-xs text-slate-300';
+    const hint = document.createElement('p');
+    hint.className = 'text-center text-[11px] text-slate-500';
+    hint.textContent = isPort
+      ? 'Ziehe das Gebiet auf eine angrenzende Seezone: markierte Schiffe fahren, markierte Landeinheiten werden eingeschifft (nur in einer alleinig besetzten Zone mit eigenem Schiff).'
+      : 'Ziehe die Zone auf eine andere Zone (Schiffe verlegen, feindliche Zone = Seeschlacht) oder auf ein Küstengebiet (Truppen ausschiffen, Schiffe einlaufen; verteidigtes Feindgebiet = Landungsangriff).';
+
+    const selection = (): { ships: number; units: UnitComposition } => {
+      const u: Record<keyof UnitComposition, number> = { ...emptyComposition() };
+      let n = 0;
+      for (const r of rows) {
+        if (!selected.has(r.key)) continue;
+        if (r.kind === 'ship') n += 1;
+        else u[r.kind] += 1;
+      }
+      return { ships: n, units: u };
+    };
+    const refresh = (): void => {
+      list.replaceChildren();
+      for (const r of rows) {
+        const on = selected.has(r.key);
+        const row = document.createElement('button');
+        row.type = 'button';
+        row.className = `flex items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs ${on ? 'bg-amber-500/30 text-slate-100' : 'bg-slate-900/50 text-slate-500 line-through'}`;
+        row.append(r.kind === 'ship' ? createShipIcon('h-4 w-4 shrink-0') : createUnitIcon(r.kind, 'h-4 w-4 shrink-0'), document.createTextNode(r.kind === 'ship' ? 'Schiff' : UNIT_LABELS[r.kind]));
+        row.addEventListener('click', () => {
+          if (on) selected.delete(r.key);
+          else selected.add(r.key);
+          refresh();
+        });
+        list.appendChild(row);
+      }
+      const sel = selection();
+      const parts = [sel.ships > 0 ? `${sel.ships} Schiffe` : '', totalUnits(sel.units) > 0 ? describeComposition(sel.units) : ''].filter(Boolean);
+      summary.textContent = rows.length === 0 ? 'Hier ist nichts verfügbar.' : `Ausgewählt: ${parts.join(', ') || 'nichts'}`;
+    };
+    refresh();
+
+    const bulk = document.createElement('div');
+    bulk.className = 'flex gap-1.5';
+    const all = document.createElement('button');
+    all.type = 'button';
+    all.textContent = 'Alle auswählen';
+    all.className = 'flex-1 rounded px-1.5 py-1 text-[11px] text-amber-300 bg-amber-500/10 hover:bg-amber-500/20';
+    all.addEventListener('click', () => {
+      selected = new Set(rows.map((r) => r.key));
+      refresh();
+    });
+    const none = document.createElement('button');
+    none.type = 'button';
+    none.textContent = 'Alle abwählen';
+    none.className = 'flex-1 rounded px-1.5 py-1 text-[11px] text-slate-400 bg-slate-900/50 hover:bg-slate-800';
+    none.addEventListener('click', () => {
+      selected = new Set();
+      refresh();
+    });
+    bulk.append(all, none);
+    el.append(titleEl, bulk, list, summary, hint);
+    return { el, getSelection: selection };
+  }
+
+  /**
+   * Marine-Tab, Ziehen: wie die Bewegung im Karten-Tab, nur mit Schiffen. Schickt die im Panel markierte Auswahl (ohne
+   * geöffnetes Panel alles Verfügbare): Schiffe fahren (Küste -> Zone, Zone -> Zone, Zone -> eigener Hafen; in eine feindliche
+   * Zone mit Schiffen = Seeschlacht), Landeinheiten werden ein- (Küste -> Zone) oder ausgeschifft (Zone -> Küste), und ein
+   * Ziehen von einer Zone auf ein verteidigtes feindliches Küstengebiet ist ein Landungsangriff.
+   */
+  private handleNavalDrop(fromId: string, toId: string): void {
+    const gs = this.currentGameState;
+    const me = this.client.playerId;
+    const zones = this.data.seaZones;
+    const fromIsZone = isSeaZoneId(zones, fromId);
+    const toIsZone = isSeaZoneId(zones, toId);
+    if (!fromIsZone && !toIsZone) {
+      this.showError('Im Marine-Tab bewegst du Schiffe über Wasser - Landbewegungen gehen im Karten-Tab.');
+      return;
+    }
+    let ships = availableShips(gs, me, fromId, zones);
+    let units = emptyComposition();
+    if (fromIsZone) {
+      const z = seaStateOf(gs, fromId);
+      if (z.ownerId === me) units = subtractGarrisons(z.embarked, z.embarkedMovedIn);
+    } else {
+      const st = gs.territoryState.get(fromId);
+      const stack = st ? stackOf(st, me) : null;
+      if (stack) units = availableToMove(stack);
+    }
+    if (this.selectedMoveSourceId === fromId && this.currentNavalPanel) {
+      const sel = this.currentNavalPanel.getSelection();
+      ships = sel.ships;
+      units = sel.units;
+    }
+
+    const toState = gs.territoryState.get(toId);
+    const enemyDefended =
+      !toIsZone && !!toState && toState.ownerId !== null && toState.ownerId !== me && !areAllied(gs, me, toState.ownerId) && totalUnits(defenderForce(toState)) > 0;
+    if (fromIsZone && enemyDefended) {
+      if (totalUnits(units) === 0) {
+        this.showError('Keine ausgeschifften Truppen für einen Landungsangriff verfügbar.');
+        return;
+      }
+      if (!areAtWar(gs, me, toState!.ownerId!)) {
+        this.showError('Kein Kriegszustand - erst den Krieg erklären, bevor angegriffen werden kann.');
+        return;
+      }
+      this.client.attack(fromId, toId);
+      this.closeMoveSelection();
+      return;
+    }
+
+    const moveShipsOk = ships > 0 && (toIsZone || (fromIsZone && toState?.ownerId === me));
+    const moveUnitsOk = totalUnits(units) > 0 && fromIsZone !== toIsZone;
+    if (!moveShipsOk && !moveUnitsOk) {
+      this.showError('Von dort ist nach dorthin nichts zu bewegen - Schiffe fahren Küste/Zone, Truppen werden nur ein- oder ausgeschifft.');
+      return;
+    }
+    // Einschiffen: erst die Schiffe (sie besetzen ggf. die Zone); Ausschiffen: erst die Truppen (das letzte Schiff darf nicht mit Truppen an Bord ablegen).
+    if (fromIsZone) {
+      if (moveUnitsOk) this.client.moveUnits(fromId, toId, units);
+      if (moveShipsOk) this.client.moveShips(fromId, toId, ships);
+    } else {
+      if (moveShipsOk) this.client.moveShips(fromId, toId, ships);
+      if (moveUnitsOk) this.client.moveUnits(fromId, toId, units);
+    }
+    this.closeMoveSelection();
+  }
+
+  /** Schiffe im Hafen eines Küstengebiets bauen (siehe engine/economy.ts's recruitShips). */
+  private openShipRecruitMenu(territoryId: string): void {
+    const points = this.currentGameState.resources.get(this.client.playerId) ?? 0;
+    const state = this.currentGameState.territoryState.get(territoryId);
+    const { card, close } = this.openModal(`Schiffe: ${this.mapName(territoryId)}`);
+    const unlocked = isNavalUnlocked(this.currentGameState, this.client.playerId, 'ships');
+    if (!unlocked) {
+      const p = document.createElement('p');
+      p.className = 'text-sm text-slate-300';
+      p.textContent = 'Schiffe sind noch nicht erforscht - siehe Research > Marine.';
+      card.appendChild(p);
+    }
+    let count = 0;
+    const max = Math.max(0, Math.min(Math.floor(points / SHIP_COST), MAX_SHIPS_PER_STACK - (state?.ships ?? 0)));
+    const info = document.createElement('p');
+    info.className = 'text-sm text-slate-300';
+    const confirmBtn = document.createElement('button');
+    confirmBtn.type = 'button';
+    confirmBtn.textContent = 'Bauen';
+    confirmBtn.className = primaryBtnClass;
+    confirmBtn.addEventListener('click', () => {
+      this.client.recruitShips(territoryId, count);
+      close();
+    });
+    const update = (): void => {
+      info.textContent = `Kosten: ${count * SHIP_COST} / ${points} Rüstungspunkte verfügbar`;
+      confirmBtn.disabled = !unlocked || count === 0;
+    };
+    update();
+    card.appendChild(info);
+    const { row } = this.createShipStepper(`Schiff (${SHIP_COST} Pkt.)`, () => count < max, (v) => {
+      count = v;
+      update();
+    });
+    card.appendChild(row);
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.textContent = 'Abbrechen';
+    cancelBtn.className = secondaryBtnClass;
+    cancelBtn.addEventListener('click', () => close());
+    const actions = document.createElement('div');
+    actions.className = 'flex justify-end gap-2 pt-2';
+    actions.append(cancelBtn, confirmBtn);
+    card.appendChild(actions);
+  }
+
+  /** Ein +/- Zeilen-Zähler mit frei wählbarer Beschriftung (für Schiffe und Truppen auf See). */
+  private createShipStepper(label: string, canIncrement: () => boolean, onChange: (value: number) => void, initial = 0): { row: HTMLDivElement } {
+    const { row } = this.createStepperRow('infantry', null, initial, canIncrement, onChange);
+    const labelEl = row.firstElementChild as HTMLElement;
+    labelEl.replaceChildren(createShipIcon(), document.createTextNode(label));
+    return { row };
   }
 
   private closeMoveSelection(): void {
     this.selectedMoveSourceId = null;
     this.currentMoveSelectionPanel = null;
+    this.currentNavalPanel = null;
+    this.diplomacyFocusOwnerId = null;
     this.moveSelectionSlot.replaceChildren();
     this.map.setSelectedTerritory(null);
+  }
+
+  /** Clicking a country in the Diplomatie tab selects its owner: their allies are listed in a side
+   *  panel and every territory of theirs and of their allies gets outlined - clicking the same
+   *  country again (or one nobody owns) clears it. See renderDiplomacyFocus. */
+  private handleDiplomacyTerritoryClick(territoryId: string): void {
+    const ownerId = this.currentGameState.territoryState.get(territoryId)?.ownerId ?? null;
+    if (!ownerId || ownerId === this.diplomacyFocusOwnerId) {
+      this.closeMoveSelection();
+      return;
+    }
+    this.diplomacyFocusOwnerId = ownerId;
+    this.renderDiplomacyFocus();
+  }
+
+  /** (Re)builds the Diplomatie tab's clicked-country panel and map outlines from the current game
+   *  state - called on the click itself and again on every state update while it's open, since
+   *  alliances form and dissolve mid-game. Closes itself if the country has since been eliminated. */
+  private renderDiplomacyFocus(): void {
+    const ownerId = this.diplomacyFocusOwnerId;
+    const state = this.currentGameState;
+    const owner = ownerId ? state.players.find((p) => p.id === ownerId) : undefined;
+    if (!ownerId || !owner || isEliminated(state, ownerId)) {
+      this.closeMoveSelection();
+      return;
+    }
+
+    this.moveSelectionSlot.replaceChildren(this.buildDiplomacyFocusPanel(owner.id));
+
+    const allyIds = new Set(alliesOf(state, ownerId));
+    const outlines: { territoryId: string; stroke: string; strokeWidth: string }[] = [];
+    for (const [id, territoryState] of state.territoryState) {
+      if (territoryState.ownerId === ownerId) {
+        outlines.push({ territoryId: id, stroke: DIPLOMACY_FOCUS_STROKE, strokeWidth: DIPLOMACY_FOCUS_STROKE_WIDTH });
+      } else if (territoryState.ownerId && allyIds.has(territoryState.ownerId)) {
+        outlines.push({ territoryId: id, stroke: DIPLOMACY_ALLY_STROKE, strokeWidth: DIPLOMACY_ALLY_STROKE_WIDTH });
+      }
+    }
+    // The clicked country's own outline is drawn last so it stays on top where it borders an ally.
+    outlines.sort((a, b) => (a.stroke === DIPLOMACY_FOCUS_STROKE ? 1 : 0) - (b.stroke === DIPLOMACY_FOCUS_STROKE ? 1 : 0));
+    this.map.setOutlinedTerritories(outlines);
+  }
+
+  /** The list of `ownerId`'s allies as color-dotted name chips ("Du" for the viewer themselves),
+   *  or a "Keine Verbündeten." line - shared by the clicked-country panel and the diplomacy modal.
+   *  Eliminated players are left out: they have nothing on the map to show anymore. */
+  private buildAlliesList(ownerId: string): HTMLDivElement {
+    const state = this.currentGameState;
+    const el = document.createElement('div');
+    el.className = 'flex flex-col gap-1';
+
+    const title = document.createElement('p');
+    title.className = 'text-xs font-semibold uppercase tracking-wide text-slate-400';
+    title.textContent = 'Verbündete';
+    el.appendChild(title);
+
+    const allies = alliesOf(state, ownerId)
+      .map((id) => state.players.find((p) => p.id === id))
+      .filter((p): p is Player => p !== undefined && !isEliminated(state, p.id));
+
+    if (allies.length === 0) {
+      const none = document.createElement('p');
+      none.className = 'text-sm text-slate-500';
+      none.textContent = 'Keine Verbündeten.';
+      el.appendChild(none);
+      return el;
+    }
+
+    const chips = document.createElement('div');
+    chips.className = 'flex flex-wrap gap-1.5';
+    for (const ally of allies) {
+      const chip = document.createElement('span');
+      chip.className = 'flex items-center gap-1.5 rounded-md border border-slate-600 bg-slate-900/60 px-2 py-0.5 text-xs text-slate-100';
+      const swatch = document.createElement('span');
+      swatch.className = 'h-2.5 w-2.5 shrink-0 rounded-full';
+      swatch.style.background = ally.color;
+      const isMe = ally.id === this.client.playerId;
+      chip.append(swatch, document.createTextNode(isMe ? 'Du' : `${ally.name}${ally.isAI ? ' (KI)' : ''}`));
+      chips.appendChild(chip);
+    }
+    el.appendChild(chips);
+    return el;
+  }
+
+  /** The floating card for the country clicked in the Diplomatie tab - same fixed top-right drawer
+   *  style as buildUnitSelectionPanel, so opening it never shifts the map. Shows who they are, how
+   *  they stand with the viewer, and their allies; "Diplomatie öffnen" jumps to the usual
+   *  war/pact/alliance modal for them. */
+  private buildDiplomacyFocusPanel(ownerId: string): HTMLDivElement {
+    const state = this.currentGameState;
+    const owner = state.players.find((p) => p.id === ownerId)!;
+    const isMe = ownerId === this.client.playerId;
+
+    const el = document.createElement('div');
+    el.className =
+      'fixed right-4 top-56 z-30 flex max-h-[65vh] w-72 max-w-[calc(100vw-2rem)] flex-col gap-2 overflow-y-auto rounded-md border border-sky-500/50 bg-slate-900/95 p-3 shadow-lg shadow-slate-950/50';
+
+    const titleRow = document.createElement('div');
+    titleRow.className = 'flex items-center gap-2 text-sm font-semibold text-slate-100';
+    const swatch = document.createElement('span');
+    swatch.className = 'h-3 w-3 shrink-0 rounded-full';
+    swatch.style.background = owner.color;
+    titleRow.append(swatch, document.createTextNode(`${owner.name}${owner.isAI ? ' (KI)' : ''}${isMe ? ' (du)' : ''}`));
+
+    const relationText = document.createElement('p');
+    relationText.className = 'text-xs text-slate-400';
+    if (isMe) {
+      relationText.textContent = 'Deine Allianz - ihre Mitglieder sehen deine Einheiten und du ihre.';
+    } else {
+      const relation = getRelation(state, this.client.playerId, ownerId);
+      relationText.textContent = relation.atWar
+        ? relation.viaAlliance
+          ? 'Im Krieg (Bündnisfall).'
+          : 'Im Krieg mit dir.'
+        : relation.allied
+          ? 'Mit dir verbündet.'
+          : relation.pact?.active
+            ? 'Nichtangriffspakt mit dir.'
+            : 'Frieden.';
+    }
+
+    el.append(titleRow, relationText, this.buildAlliesList(ownerId));
+
+    if (!isMe) {
+      const openBtn = document.createElement('button');
+      openBtn.type = 'button';
+      openBtn.textContent = 'Diplomatie öffnen';
+      openBtn.className = `${secondaryBtnClass} w-full`;
+      openBtn.addEventListener('click', () => this.openDiplomacyMenu(ownerId));
+      el.appendChild(openBtn);
+    }
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.textContent = 'Schließen';
+    closeBtn.className = `${secondaryBtnClass} w-full`;
+    closeBtn.addEventListener('click', () => this.closeMoveSelection());
+    el.appendChild(closeBtn);
+
+    return el;
   }
 
   private handleResourceTerritoryClick(territoryId: string): void {
@@ -2432,26 +3145,32 @@ export class GameScreen {
     const recruitRows = document.createElement('div');
     recruitRows.className = 'flex flex-col gap-2';
 
+    // Aircraft are only ever bought a whole Einheit (AIRCRAFT_PACKET_SIZE = 100 aircraft) at a
+    // time - each stepper click below adds/removes exactly one Einheit. The stepper's own displayed
+    // count is the number of Einheiten queued, not the raw aircraft count; `amount[type]` (what
+    // actually gets sent to recruitAircraft) is that count times AIRCRAFT_PACKET_SIZE.
     const amount: Record<keyof AirComposition, number> = { fighters: 0, cas: 0, bombers: 0 };
     const stepperRefreshers: (() => void)[] = [];
+    const stepperResets: (() => void)[] = [];
     for (const type of AIRCRAFT_TYPES) {
-      const { row, refresh: refreshStepper } = this.createAircraftStepperRow(
-        `${AIRCRAFT_LABELS[type]} (${AIRCRAFT_COST_PER_100[type]} Pkt./100)`,
+      const { row, refresh: refreshStepper, resetValue } = this.createAircraftStepperRow(
+        `${AIRCRAFT_LABELS[type]} (${AIRCRAFT_COST_PER_100[type]} Pkt./Einheit, 1 Einheit = ${AIRCRAFT_PACKET_SIZE} Flugzeuge)`,
         0,
         () => {
           const airfield = airfieldAt(this.currentGameState, territoryId);
           const points = this.currentGameState.resources.get(this.client.playerId) ?? 0;
           const capacityLeft = airfieldCapacity(airfield.level) - totalAircraft(airfield.aircraft) - totalAircraft(amount);
-          const nextAmount = { ...amount, [type]: amount[type] + 1 };
-          return capacityLeft > 0 && airCostOf(nextAmount) <= points;
+          const nextAmount = { ...amount, [type]: amount[type] + AIRCRAFT_PACKET_SIZE };
+          return capacityLeft >= AIRCRAFT_PACKET_SIZE && airCostOf(nextAmount) <= points;
         },
-        (value) => {
-          amount[type] = value;
+        (einheiten) => {
+          amount[type] = einheiten * AIRCRAFT_PACKET_SIZE;
           refreshAll();
         },
       );
       recruitRows.appendChild(row);
       stepperRefreshers.push(refreshStepper);
+      stepperResets.push(resetValue);
     }
 
     const recruitCostText = document.createElement('p');
@@ -2466,6 +3185,7 @@ export class GameScreen {
       amount.fighters = 0;
       amount.cas = 0;
       amount.bombers = 0;
+      for (const reset of stepperResets) reset();
       refreshAll();
     });
 
@@ -2540,7 +3260,7 @@ export class GameScreen {
     initial: number,
     canIncrement: () => boolean,
     onChange: (value: number) => void,
-  ): { row: HTMLDivElement; refresh: () => void } {
+  ): { row: HTMLDivElement; refresh: () => void; resetValue: () => void } {
     const row = document.createElement('div');
     row.className = 'flex items-center justify-between gap-3';
 
@@ -2570,16 +3290,18 @@ export class GameScreen {
       plusBtn.disabled = !canIncrement();
     };
 
-    minusBtn.addEventListener('click', () => {
-      if (value <= 0) return;
-      value -= 1;
-      onChange(value);
+    minusBtn.addEventListener('click', (e) => {
+      for (let i = 0, steps = e.shiftKey ? 10 : 1; i < steps && value > 0; i++) {
+        value -= 1;
+        onChange(value);
+      }
       refresh();
     });
-    plusBtn.addEventListener('click', () => {
-      if (!canIncrement()) return;
-      value += 1;
-      onChange(value);
+    plusBtn.addEventListener('click', (e) => {
+      for (let i = 0, steps = e.shiftKey ? 10 : 1; i < steps && canIncrement(); i++) {
+        value += 1;
+        onChange(value);
+      }
       refresh();
     });
     refresh();
@@ -2589,7 +3311,11 @@ export class GameScreen {
     controls.append(minusBtn, valueEl, plusBtn);
 
     row.append(labelEl, controls);
-    return { row, refresh };
+    const resetValue = (): void => {
+      value = 0;
+      refresh();
+    };
+    return { row, refresh, resetValue };
   }
 
   /** Opens a target-territory picker to launch a Bomber raid from `fromTerritoryId` (which must
@@ -2801,9 +3527,11 @@ export class GameScreen {
     refreshStepper();
   }
 
-  /** Opens from clicking another player's legend chip: shows the current relation and whichever
-   *  actions apply (declare war, propose/withdraw a pact, cancel one). Stays open and refreshes
-   *  itself as the game state updates, same reasoning as openDevelopmentMenu. */
+  /** Opens from clicking another player's legend chip (or "Diplomatie öffnen" on the Diplomatie
+   *  tab's clicked-country panel): shows the current relation, that player's allies, and whichever
+   *  actions apply (declare war, propose/withdraw/cancel a pact, propose/withdraw an alliance or
+   *  leave the one you're in). Stays open and refreshes itself as the game state updates, same
+   *  reasoning as openDevelopmentMenu. */
   /** Opens right when a player's chip is clicked ("wenn er sie anklickt soll er eine Schätzung
    *  sehen") and stays live for as long as the modal is open: a spy-report-style range for that
    *  player's true total Einheiten/Fabriken/Luftwaffe - see engine/intel.ts's estimateForces for
@@ -2866,7 +3594,7 @@ export class GameScreen {
 
     const withdrawBtn = document.createElement('button');
     withdrawBtn.type = 'button';
-    withdrawBtn.textContent = 'Angebot zurückziehen';
+    withdrawBtn.textContent = 'Paktangebot zurückziehen';
     withdrawBtn.className = `${secondaryBtnClass} w-full`;
     withdrawBtn.addEventListener('click', () => this.client.withdrawPactProposal(targetId));
 
@@ -2876,6 +3604,37 @@ export class GameScreen {
     cancelPactBtn.className = `${secondaryBtnClass} w-full`;
     cancelPactBtn.addEventListener('click', () => this.client.cancelPact(targetId));
 
+    const allianceBtn = document.createElement('button');
+    allianceBtn.type = 'button';
+    allianceBtn.textContent = 'Allianz vorschlagen';
+    allianceBtn.className = `${secondaryBtnClass} w-full`;
+    allianceBtn.addEventListener('click', () => this.client.proposeAlliance(targetId));
+
+    // Why an alliance isn't possible right now (see engine/diplomacy.ts's allianceConflict) - shown
+    // under the button instead of leaving it disabled with no explanation.
+    const allianceHint = document.createElement('p');
+    allianceHint.className = 'text-xs text-slate-500';
+
+    const withdrawAllianceBtn = document.createElement('button');
+    withdrawAllianceBtn.type = 'button';
+    withdrawAllianceBtn.textContent = 'Bündnisangebot zurückziehen';
+    withdrawAllianceBtn.className = `${secondaryBtnClass} w-full`;
+    withdrawAllianceBtn.addEventListener('click', () => this.client.withdrawAllianceProposal(targetId));
+
+    const leaveAllianceBtn = document.createElement('button');
+    leaveAllianceBtn.type = 'button';
+    leaveAllianceBtn.textContent = 'Allianz verlassen';
+    leaveAllianceBtn.className = `${secondaryBtnClass} w-full`;
+    leaveAllianceBtn.addEventListener('click', () => this.client.leaveAlliance());
+
+    // Leaving takes you out of the whole alliance, not just this one member's relation to you - say
+    // so before someone clicks it expecting a one-on-one break-up.
+    const leaveHint = document.createElement('p');
+    leaveHint.className = 'text-xs text-slate-500';
+    leaveHint.textContent = `Du verlässt die ganze Allianz, nicht nur ${target?.name ?? 'diesen Spieler'}. Laufende Kriege bleiben bestehen; ein Krieg gegen die bisherigen Verbündeten ist danach ${PACT_COOLDOWN_ROUNDS} Runden lang blockiert.`;
+
+    const alliesSlot = document.createElement('div');
+
     const closeBtn = document.createElement('button');
     closeBtn.type = 'button';
     closeBtn.textContent = 'Schließen';
@@ -2883,41 +3642,81 @@ export class GameScreen {
     closeBtn.addEventListener('click', () => close());
 
     const refresh = (): void => {
-      const isMyTurn = this.currentGameState.activePlayerId === this.client.playerId;
-      const relation = getRelation(this.currentGameState, this.client.playerId, targetId);
-      const iOffered = hasPendingProposal(this.currentGameState, this.client.playerId, targetId);
-      const theyOffered = hasPendingProposal(this.currentGameState, targetId, this.client.playerId);
+      const state = this.currentGameState;
+      const myId = this.client.playerId;
+      const isMyTurn = state.activePlayerId === myId;
+      const relation = getRelation(state, myId, targetId);
+      const iOffered = hasPendingProposal(state, myId, targetId);
+      const theyOffered = hasPendingProposal(state, targetId, myId);
+      const iOfferedAlliance = hasPendingAllianceProposal(state, myId, targetId);
+      const theyOfferedAlliance = hasPendingAllianceProposal(state, targetId, myId);
+      const allied = relation.allied === true;
       const pact = relation.pact;
       const pactActive = pact?.active === true;
       // Rounds (including this one) still blocking a new war - matches engine/diplomacy.ts's
-      // declareWar check (`currentRound > blocksWarUntilRound`) exactly.
+      // declareWar check (`currentRound > blocksWarUntilRound`) exactly. Also what leaving an
+      // alliance leaves behind, see engine/diplomacy.ts's leaveAlliance.
       const pactCooldownRemaining =
-        pact && !pact.active ? Math.max(0, pact.blocksWarUntilRound - this.currentGameState.turn + 1) : 0;
-      const warBlocked = relation.atWar || pactActive || pactCooldownRemaining > 0;
+        pact && !pact.active ? Math.max(0, pact.blocksWarUntilRound - state.turn + 1) : 0;
+      const warBlocked = relation.atWar || allied || pactActive || pactCooldownRemaining > 0;
 
       let status: string;
-      if (relation.atWar) status = 'Im Krieg.';
+      if (relation.atWar) status = relation.viaAlliance ? 'Im Krieg (Bündnisfall - über eine Allianz beigetreten).' : 'Im Krieg.';
+      else if (allied) status = 'Verbündet.';
       else if (pactActive) status = 'Nichtangriffspakt aktiv.';
-      else if (pactCooldownRemaining > 0) status = `Pakt gekündigt - wirkt noch ${pactCooldownRemaining} Runde(n) nach.`;
+      else if (pactCooldownRemaining > 0) status = `Pakt/Bündnis gekündigt - Krieg noch ${pactCooldownRemaining} Runde(n) blockiert.`;
       else status = 'Frieden.';
+      if (allied && pactActive) status += ' Nichtangriffspakt aktiv.';
       if (iOffered) status += ' Dein Paktangebot ist noch offen.';
-      if (theyOffered) status += ' Angebot erhalten - ein eigenes Angebot nimmt es sofort an.';
+      if (theyOffered) status += ' Paktangebot erhalten - ein eigenes Angebot nimmt es sofort an.';
+      if (iOfferedAlliance) status += ' Dein Bündnisangebot ist noch offen.';
+      if (theyOfferedAlliance) status += ' Bündnisangebot erhalten - ein eigenes Angebot nimmt es sofort an.';
       statusText.textContent = status;
 
-      warBtn.classList.toggle('hidden', relation.atWar);
+      alliesSlot.replaceChildren(this.buildAlliesList(targetId));
+
+      warBtn.classList.toggle('hidden', relation.atWar || allied);
       warBtn.disabled = !isMyTurn || warBlocked;
 
-      pactBtn.classList.toggle('hidden', pactActive);
+      pactBtn.classList.toggle('hidden', pactActive || allied);
       pactBtn.disabled = !isMyTurn || pactActive || iOffered;
 
       withdrawBtn.classList.toggle('hidden', !iOffered);
       withdrawBtn.disabled = !isMyTurn;
 
-      cancelPactBtn.classList.toggle('hidden', !pactActive);
+      cancelPactBtn.classList.toggle('hidden', !pactActive || allied);
       cancelPactBtn.disabled = !isMyTurn;
+
+      const conflict = allied ? null : allianceConflict(state, myId, targetId);
+      allianceBtn.classList.toggle('hidden', allied);
+      allianceBtn.textContent = theyOfferedAlliance ? 'Bündnisangebot annehmen' : 'Allianz vorschlagen';
+      allianceBtn.disabled = !isMyTurn || iOfferedAlliance || conflict !== null;
+      allianceHint.textContent = conflict ?? '';
+      allianceHint.classList.toggle('hidden', conflict === null);
+
+      withdrawAllianceBtn.classList.toggle('hidden', !iOfferedAlliance);
+      withdrawAllianceBtn.disabled = !isMyTurn;
+
+      leaveAllianceBtn.classList.toggle('hidden', !allied);
+      leaveAllianceBtn.disabled = !isMyTurn;
+      leaveHint.classList.toggle('hidden', !allied);
     };
 
-    card.append(statusText, estimatePanel.el, warBtn, pactBtn, withdrawBtn, cancelPactBtn, closeBtn);
+    card.append(
+      statusText,
+      alliesSlot,
+      estimatePanel.el,
+      warBtn,
+      pactBtn,
+      withdrawBtn,
+      cancelPactBtn,
+      allianceBtn,
+      allianceHint,
+      withdrawAllianceBtn,
+      leaveAllianceBtn,
+      leaveHint,
+      closeBtn,
+    );
     this.currentDiplomacyPanel = { refresh };
     refresh();
   }
@@ -3009,16 +3808,18 @@ export class GameScreen {
       plusBtn.disabled = !canIncrement();
     };
 
-    minusBtn.addEventListener('click', () => {
-      if (value <= 0) return;
-      value -= 1;
-      onChange(value);
+    minusBtn.addEventListener('click', (e) => {
+      for (let i = 0, steps = e.shiftKey ? 10 : 1; i < steps && value > 0; i++) {
+        value -= 1;
+        onChange(value);
+      }
       refresh();
     });
-    plusBtn.addEventListener('click', () => {
-      if (!canIncrement()) return;
-      value += 1;
-      onChange(value);
+    plusBtn.addEventListener('click', (e) => {
+      for (let i = 0, steps = e.shiftKey ? 10 : 1; i < steps && canIncrement(); i++) {
+        value += 1;
+        onChange(value);
+      }
       refresh();
     });
     refresh();

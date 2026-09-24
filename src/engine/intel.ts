@@ -1,7 +1,8 @@
 import type { GameState } from './types';
-import { totalUnits } from './movement';
+import { playerForce, totalUnits } from './movement';
 import { developmentAt } from './economy';
 import { totalAircraft } from './airforce';
+import { areAllied } from './diplomacy';
 
 /** How far off one side of an estimate can randomly land - "zufällig zwischen 5% und 25% unter/
  *  über dem tatsächlichen Wert". */
@@ -45,15 +46,19 @@ export interface ForceEstimate {
  * client normally sees, which is fogged by engine/visibility.ts) - an estimate of hidden strength
  * is the whole point. Callers (see net/GameClient.ts's estimateEnemyForces) must only ever expose
  * the resulting fuzzy range to a player, never this function's authoritative input.
+ *
+ * When `viewerId` is allied with the target there's nothing to estimate: allies see each other's
+ * units outright (see engine/visibility.ts), so the report is exact (low === high) instead.
  */
-export function estimateForces(gameState: GameState, targetPlayerId: string): ForceEstimate {
-  let units = 0;
+export function estimateForces(gameState: GameState, targetPlayerId: string, viewerId?: string): ForceEstimate {
+  const exact = viewerId !== undefined && areAllied(gameState, viewerId, targetPlayerId);
+  // Troops stationed on an ally's ground count too, not just the garrisons at home.
+  const units = totalUnits(playerForce(gameState, targetPlayerId));
   let factories = 0;
   let airforce = 0;
 
   for (const [territoryId, state] of gameState.territoryState) {
     if (state.ownerId !== targetPlayerId) continue;
-    units += totalUnits(state.garrison);
     factories += developmentAt(gameState, territoryId).factories;
   }
   for (const [territoryId, airfield] of gameState.airfields) {
@@ -61,9 +66,10 @@ export function estimateForces(gameState: GameState, targetPlayerId: string): Fo
     airforce += totalAircraft(airfield.aircraft);
   }
 
+  const range = (trueValue: number): EstimateRange => (exact ? { low: trueValue, high: trueValue } : estimateRange(trueValue));
   return {
-    units: estimateRange(units),
-    factories: estimateRange(factories),
-    airforce: estimateRange(airforce),
+    units: range(units),
+    factories: range(factories),
+    airforce: range(airforce),
   };
 }

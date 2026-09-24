@@ -1,6 +1,7 @@
 import type { AiDifficulty, AiSlot, DiplomacyState, DiplomacyStateWire, GameState, GameStateWire, LobbySlot, LobbyState, PendingBattle, PendingBattleWire, Territory } from './types';
 import { FACTION_COLORS, MAX_FACTIONS } from './palette';
-import { pickCapitals } from './setup';
+import { pickCapitals, finalizeScenarioLobby } from './setup';
+import { scenarioById } from '../data/Scenarios';
 import { randomAiName } from './aiNames';
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; // no 0/O/1/I/L - avoids typos when shared aloud
@@ -44,9 +45,17 @@ export function createLobby(
   hostName: string,
   mapId: string,
   aiDifficulty: AiDifficulty = 'medium',
+  scenarioId?: string,
 ): LobbyState {
   if (maxHumans < 1 || maxHumans > MAX_FACTIONS) {
     throw new Error(`maxHumans must be between 1 and ${MAX_FACTIONS}`);
+  }
+  // Szenario-Lobby: die Karte ist die des Szenarios, und es können höchstens so viele Menschen wie Fraktionen mitspielen.
+  if (scenarioId !== undefined) {
+    const scenario = scenarioById(scenarioId);
+    if (!scenario) throw new Error(`Unbekanntes Szenario "${scenarioId}".`);
+    if (maxHumans > scenario.factions.length) throw new Error(`Dieses Szenario hat nur ${scenario.factions.length} Fraktionen.`);
+    mapId = scenario.mapId;
   }
   const host: LobbySlot = {
     playerId: hostId,
@@ -55,7 +64,7 @@ export function createLobby(
     capitalId: null,
     isHost: true,
   };
-  return { code, mapId, maxHumans, slots: [host], aiSlots: [], status: 'lobby', aiDifficulty };
+  return { code, mapId, maxHumans, slots: [host], aiSlots: [], status: 'lobby', aiDifficulty, ...(scenarioId !== undefined ? { scenarioId } : {}) };
 }
 
 export function addSlot(lobby: LobbyState, playerId: string, name: string): LobbyState {
@@ -78,19 +87,24 @@ export function claimCapital(
   if (!territories.some((t) => t.id === territoryId)) throw new Error(`unknown territory "${territoryId}"`);
   if (!lobby.slots.some((s) => s.playerId === playerId)) throw new Error('not a member of this lobby');
 
+  // Szenario-Lobby: statt einer freien Hauptstadt wählt man eine Fraktion (= deren Hauptstadt), und übernimmt ihre Farbe.
+  const faction = lobby.scenarioId ? scenarioById(lobby.scenarioId)?.factions.find((f) => f.capitalId === territoryId) : undefined;
+  if (lobby.scenarioId && !faction) throw new Error('In einem Szenario wählst du eine Fraktion (die Hauptstadt einer Fraktion).');
+
   const takenByHuman = lobby.slots.some((s) => s.capitalId === territoryId && s.playerId !== playerId);
   const takenByAi = lobby.aiSlots.some((a) => a.capitalId === territoryId);
   if (takenByHuman || takenByAi) throw new Error('Gebiet ist bereits vergeben.');
 
   return {
     ...lobby,
-    slots: lobby.slots.map((s) => (s.playerId === playerId ? { ...s, capitalId: territoryId } : s)),
+    slots: lobby.slots.map((s) => (s.playerId === playerId ? { ...s, capitalId: territoryId, ...(faction ? { color: faction.color } : {}) } : s)),
   };
 }
 
 /** Adds one AI with an immediately-assigned, spread-out capital (visible on the map right away). */
 export function addAi(lobby: LobbyState, territories: readonly Territory[]): LobbyState {
   if (lobby.status !== 'lobby') throw new Error('game already started');
+  if (lobby.scenarioId) throw new Error('In einem Szenario stellen die nicht gewählten Fraktionen die KI.');
   if (totalFactions(lobby) >= MAX_FACTIONS) throw new Error('Maximale Anzahl Fraktionen erreicht.');
 
   const [capital] = pickCapitals(territories, 1, claimedTerritories(lobby, territories));
@@ -107,6 +121,14 @@ export function removeAi(lobby: LobbyState, aiId: string): LobbyState {
 }
 
 export function canStart(lobby: LobbyState): boolean {
+  // Szenario-Lobby: die KI-Sitze ergeben sich erst aus den nicht gewählten Fraktionen (finalizeScenarioLobby).
+  if (lobby.scenarioId) {
+    try {
+      lobby = finalizeScenarioLobby(lobby);
+    } catch {
+      return false;
+    }
+  }
   return (
     lobby.status === 'lobby' &&
     lobby.slots.length > 0 &&
@@ -126,11 +148,20 @@ function deserializePendingBattle(wire: PendingBattleWire | null): PendingBattle
 }
 
 function serializeDiplomacy(state: DiplomacyState): DiplomacyStateWire {
-  return { relations: [...state.relations.entries()], pactProposals: [...state.pactProposals] };
+  return {
+    relations: [...state.relations.entries()],
+    pactProposals: [...state.pactProposals],
+    allianceProposals: [...state.allianceProposals],
+  };
 }
 
 function deserializeDiplomacy(wire: DiplomacyStateWire): DiplomacyState {
-  return { relations: new Map(wire.relations), pactProposals: new Set(wire.pactProposals) };
+  return {
+    relations: new Map(wire.relations),
+    pactProposals: new Set(wire.pactProposals),
+    // Tolerates a peer that predates alliances and doesn't send the field at all.
+    allianceProposals: new Set(wire.allianceProposals ?? []),
+  };
 }
 
 export function serializeGameState(state: GameState): GameStateWire {
@@ -145,7 +176,10 @@ export function serializeGameState(state: GameState): GameStateWire {
     stats: [...state.stats.entries()],
     airfields: [...state.airfields.entries()],
     research: [...state.research.entries()],
+    nukeStockpiles: [...state.nukeStockpiles.entries()],
     pendingBattle: serializePendingBattle(state.pendingBattle),
+    seaZones: [...state.seaZones.entries()],
+    pendingSeaBattle: state.pendingSeaBattle,
   };
 }
 
@@ -160,7 +194,13 @@ export function deserializeGameState(wire: GameStateWire): GameState {
     diplomacy: deserializeDiplomacy(wire.diplomacy),
     stats: new Map(wire.stats),
     airfields: new Map(wire.airfields),
-    research: new Map(wire.research),
+    // Tolerates a peer/save that predates the Marine research category (no `unlockedNaval` yet).
+    research: new Map(wire.research.map(([id, r]) => [id, { ...r, unlockedNaval: r.unlockedNaval ?? [] }] as const)),
+    nukeStockpiles: new Map(wire.nukeStockpiles),
     pendingBattle: deserializePendingBattle(wire.pendingBattle),
+    // Tolerates a peer/save that predates the Seekampf (neither field is sent at all).
+    // Alte Spielstände mit "klebrigem" Zonenbesitz: Einträge ohne Schiffe verfallen (Zone ist neutral).
+    seaZones: new Map((wire.seaZones ?? []).filter(([, z]) => z.ships > 0)),
+    pendingSeaBattle: wire.pendingSeaBattle ?? null,
   };
 }

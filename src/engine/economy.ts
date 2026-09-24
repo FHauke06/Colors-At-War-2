@@ -1,6 +1,6 @@
-import type { GameState, TerritoryDevelopment, UnitComposition } from './types';
+import type { GameState, SeaZone, TerritoryDevelopment, UnitComposition } from './types';
 import { addGarrisons, totalUnits } from './movement';
-import { isGroundUnlocked, isSupportUnlocked } from './research';
+import { isGroundUnlocked, isNavalUnlocked, isSupportUnlocked } from './research';
 
 const UNIT_LABEL: Record<keyof UnitComposition, string> = {
   infantry: 'Infanterie',
@@ -99,7 +99,7 @@ export function recruitUnits(
   territoryId: string,
   amount: UnitComposition,
 ): RecruitOutcome {
-  if (gameState.pendingBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
 
   const state = gameState.territoryState.get(territoryId);
@@ -121,10 +121,9 @@ export function recruitUnits(
 
   const nextTerritoryState = new Map(gameState.territoryState);
   nextTerritoryState.set(territoryId, {
-    ownerId: playerId,
+    ...state,
     garrison: addGarrisons(state.garrison, amount),
     movedIn: addGarrisons(state.movedIn, amount),
-    extraMoveUsed: state.extraMoveUsed,
   });
 
   const resources = new Map(gameState.resources);
@@ -140,7 +139,7 @@ export type DevelopOutcome =
 /** Spends FACTORY_COST to add one factory at an owned territory, raising its Rüstungspunkte
  *  yield by 1/round - capped at BASE_FACTORY_CAPACITY plus the territory's infrastructure level. */
 export function buildFactory(gameState: GameState, playerId: string, territoryId: string): DevelopOutcome {
-  if (gameState.pendingBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
 
   const state = gameState.territoryState.get(territoryId);
@@ -165,7 +164,7 @@ export function buildFactory(gameState: GameState, playerId: string, territoryId
 /** Spends INFRASTRUCTURE_COST to raise a territory's infrastructure level by 1 (max
  *  MAX_INFRASTRUCTURE_LEVEL), each level raising its factory capacity by 1. */
 export function upgradeInfrastructure(gameState: GameState, playerId: string, territoryId: string): DevelopOutcome {
-  if (gameState.pendingBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
 
   const state = gameState.territoryState.get(territoryId);
@@ -185,4 +184,53 @@ export function upgradeInfrastructure(gameState: GameState, playerId: string, te
   resources.set(playerId, balance - INFRASTRUCTURE_COST);
 
   return { ok: true, gameState: { ...gameState, development: nextDevelopment, resources } };
+}
+
+/** Rüstungspunkte pro Schiff. Zum Vergleich: Infanterie 2, Leichter Panzer 5, Schwerer Panzer 10 - ein
+ *  Schiff ist ein voller Kasten im Seekampf und zugleich Träger für Landeinheiten, daher so teuer wie
+ *  ein Schwerer Panzer. */
+export const SHIP_COST = 10;
+/** Obergrenze für Schiffe in einem Hafen bzw. einer Seezone: genau die Kästen einer Rasterhälfte im
+ *  Seekampf (10x10-Raster, 5 Reihen pro Seite), damit jede Flotte auch aufgestellt werden kann. */
+export const MAX_SHIPS_PER_STACK = 50;
+
+/** Ob ein Landgebiet an mindestens eine Seezone grenzt (= Küstengebiet, Schiffe rekrutierbar). */
+export function isCoastal(territoryId: string, seaZones: readonly SeaZone[]): boolean {
+  return seaZones.some((z) => z.neighbors.includes(territoryId));
+}
+
+/**
+ * Rekrutiert `count` Schiffe in einem eigenen Küstengebiet (Marine-Tech `ships` nötig). Wie bei
+ * Landeinheiten haben die neuen Schiffe diese Runde schon "gehandelt" (`shipsMovedIn`).
+ */
+export function recruitShips(
+  gameState: GameState,
+  playerId: string,
+  territoryId: string,
+  count: number,
+  seaZones: readonly SeaZone[],
+): RecruitOutcome {
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
+  if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
+  const state = gameState.territoryState.get(territoryId);
+  if (!state || state.ownerId !== playerId) return { ok: false, reason: 'Das Gebiet gehört dir nicht.' };
+  if (!Number.isInteger(count) || count <= 0) return { ok: false, reason: 'Keine Schiffe ausgewählt.' };
+  if (!isNavalUnlocked(gameState, playerId, 'ships')) return { ok: false, reason: 'Schiffe noch nicht erforscht.' };
+  if (!isCoastal(territoryId, seaZones)) return { ok: false, reason: 'Schiffe können nur in Küstengebieten gebaut werden.' };
+  if ((state.ships ?? 0) + count > MAX_SHIPS_PER_STACK) {
+    return { ok: false, reason: `Höchstens ${MAX_SHIPS_PER_STACK} Schiffe pro Hafen.` };
+  }
+  const cost = count * SHIP_COST;
+  const balance = gameState.resources.get(playerId) ?? 0;
+  if (cost > balance) return { ok: false, reason: 'Nicht genug Rüstungspunkte.' };
+
+  const nextTerritoryState = new Map(gameState.territoryState);
+  nextTerritoryState.set(territoryId, {
+    ...state,
+    ships: (state.ships ?? 0) + count,
+    shipsMovedIn: (state.shipsMovedIn ?? 0) + count,
+  });
+  const resources = new Map(gameState.resources);
+  resources.set(playerId, balance - cost);
+  return { ok: true, gameState: { ...gameState, territoryState: nextTerritoryState, resources } };
 }

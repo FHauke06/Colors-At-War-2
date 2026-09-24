@@ -1,13 +1,23 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { mainMapById } from '../src/data/MainMaps';
-import type { GameState, LobbyState, Territory } from '../src/engine/types';
+import { scenarioById } from '../src/data/Scenarios';
+import type { GameState, LobbyState, SeaZone, Territory } from '../src/engine/types';
 import { addAi, addSlot, claimCapital, canStart, createLobby, generateSessionCode, removeAi, serializeGameState } from '../src/engine/session';
 import { buildGameStateFromLobby } from '../src/engine/setup';
-import { moveUnits } from '../src/engine/movement';
+import { moveUnitsAnywhere, moveShips, deploySeaFleet, seaShoot, cancelSeaBattle, proposeSeaSimulation, declineSeaSimulation, cascadeAiSeaBattle, startAmphibiousBattle, isSeaZoneId } from '../src/engine/naval';
+import type { SeaBattleResult } from '../src/engine/naval';
 import { endTurn, resumeAiTurnIfNeeded } from '../src/engine/turns';
-import { recruitUnits, buildFactory, upgradeInfrastructure } from '../src/engine/economy';
-import { declareWar, proposePact, withdrawPactProposal, cancelPact } from '../src/engine/diplomacy';
-import { unlockGroundTech, unlockAirTech, unlockSupportTech } from '../src/engine/research';
+import { recruitUnits, recruitShips, buildFactory, upgradeInfrastructure } from '../src/engine/economy';
+import {
+  declareWar,
+  proposePact,
+  withdrawPactProposal,
+  cancelPact,
+  proposeAlliance,
+  withdrawAllianceProposal,
+  leaveAlliance,
+} from '../src/engine/diplomacy';
+import { unlockGroundTech, unlockAirTech, unlockSupportTech, unlockNavalTech } from '../src/engine/research';
 import { filterGameStateForViewer } from '../src/engine/visibility';
 import {
   startBattle,
@@ -23,9 +33,10 @@ import {
   casStrike,
   endBattleTurn as endBattleTurnEngine,
   useNuke,
+  proposeBattleDraw,
 } from '../src/engine/combat';
 import type { BattleResult } from '../src/engine/combat';
-import { autoDeployForBattle, cascadeAiBattleTurns } from '../src/engine/ai';
+import { autoDeployForBattle, cascadeAiBattleTurns, respondAiToDrawOffers } from '../src/engine/ai';
 import type { PendingAiDeployment } from '../src/engine/ai';
 import { buildAirfield, upgradeAirfield, recruitAircraft, launchBomberRaid, fighterSweep } from '../src/engine/airforce';
 import { estimateForces } from '../src/engine/intel';
@@ -45,6 +56,8 @@ interface Session {
    *  uses this instead of a single global map, since different sessions can now play different
    *  maps concurrently. */
   territories: readonly Territory[];
+  /** Seezonen derselben Karte (siehe engine/naval.ts). */
+  seaZones: readonly SeaZone[];
 }
 
 const sessions = new Map<string, Session>();
@@ -72,12 +85,12 @@ function broadcastLobby(session: Session): void {
 function broadcastGameState(session: Session): void {
   if (!session.gameState) return;
   for (const [viewerId, socket] of session.sockets) {
-    const filtered = filterGameStateForViewer(session.gameState, viewerId, session.territories);
+    const filtered = filterGameStateForViewer(session.gameState, viewerId, session.territories, session.seaZones);
     send(socket, { type: 'game_state', gameState: serializeGameState(filtered) });
   }
 }
 
-function broadcastBattle(session: Session, battle: BattleResult): void {
+function broadcastBattle(session: Session, battle: BattleResult | SeaBattleResult): void {
   const message: ServerMessage = { type: 'battle', battle };
   for (const socket of session.sockets.values()) send(socket, message);
 }
@@ -98,9 +111,16 @@ function stashPendingAiDeployment(session: Session, pendingAiDeployment: Pending
  *  the game just sitting there forever once that battle resolves. A no-op the rest of the time. */
 function continueStalledAiTurn(session: Session): void {
   if (!session.gameState) return;
-  const result = resumeAiTurnIfNeeded(session.gameState, session.territories);
+  const result = resumeAiTurnIfNeeded(session.gameState, session.territories, session.seaZones);
   session.gameState = result.gameState;
   stashPendingAiDeployment(session, result.pendingAiDeployment);
+}
+
+/** Übernimmt den Zustand nach einem Seeschlacht-Schritt (inkl. KI-Zügen), meldet ein Ende und lässt einen pausierten KI-Zug weiterlaufen. */
+function afterSeaStep(session: Session, result: { readonly gameState: GameState; readonly concluded: SeaBattleResult | null }): void {
+  session.gameState = result.gameState;
+  if (result.concluded) broadcastBattle(session, result.concluded);
+  continueStalledAiTurn(session);
 }
 
 const wss = new WebSocketServer({ port: PORT });
@@ -133,15 +153,20 @@ wss.on('connection', (ws) => {
             broadcastLobby(session);
           } else {
             if (!msg.maxHumans) throw new Error('maxHumans fehlt.');
-            if (!msg.mapId) throw new Error('mapId fehlt.');
+            // Bei einem Szenario bestimmt dieses die Karte (createLobby setzt lobby.mapId entsprechend).
+            const scenario = msg.scenarioId ? scenarioById(msg.scenarioId) : undefined;
+            if (msg.scenarioId && !scenario) throw new Error('Unbekanntes Szenario.');
+            const mapId = scenario?.mapId ?? msg.mapId;
+            if (!mapId) throw new Error('mapId fehlt.');
             const code = freshCode();
-            const lobby = createLobby(code, msg.maxHumans, playerId, msg.name, msg.mapId, msg.aiDifficulty);
+            const lobby = createLobby(code, msg.maxHumans, playerId, msg.name, mapId, msg.aiDifficulty, msg.scenarioId);
             const session: Session = {
               lobby,
               gameState: null,
               sockets: new Map([[playerId, ws]]),
               pendingDeployment: {},
-              territories: mainMapById(msg.mapId).territories,
+              territories: mainMapById(mapId).territories,
+              seaZones: mainMapById(mapId).seaZones,
             };
             sessions.set(code, session);
             sessionCode = code;
@@ -191,7 +216,7 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = moveUnits(session.gameState, playerId, msg.fromId, msg.toId, session.territories, msg.amount);
+          const outcome = moveUnitsAnywhere(session.gameState, playerId, msg.fromId, msg.toId, session.territories, session.seaZones, msg.amount);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           broadcastGameState(session);
@@ -201,10 +226,93 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = endTurn(session.gameState, playerId, session.territories);
+          const outcome = endTurn(session.gameState, playerId, session.territories, session.seaZones);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           stashPendingAiDeployment(session, outcome.pendingAiDeployment);
+          broadcastGameState(session);
+          break;
+        }
+        case 'recruit_ships': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = recruitShips(session.gameState, playerId, msg.territoryId, msg.count, session.seaZones);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          session.gameState = outcome.gameState;
+          broadcastGameState(session);
+          break;
+        }
+        case 'unlock_naval_tech': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = unlockNavalTech(session.gameState, playerId, msg.tech);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          session.gameState = outcome.gameState;
+          broadcastGameState(session);
+          break;
+        }
+        case 'move_ships': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = moveShips(session.gameState, playerId, msg.fromId, msg.toId, msg.count, session.seaZones);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          session.gameState = outcome.gameState;
+          // Verteidigt die KI, stellt sie ihre Flotte sofort (verdeckt) auf.
+          if (outcome.battleStarted) afterSeaStep(session, cascadeAiSeaBattle(session.gameState));
+          broadcastGameState(session);
+          break;
+        }
+        case 'deploy_sea_fleet': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = deploySeaFleet(session.gameState, playerId, msg.cells);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          afterSeaStep(session, cascadeAiSeaBattle(outcome.gameState));
+          broadcastGameState(session);
+          break;
+        }
+        case 'sea_shoot': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = seaShoot(session.gameState, playerId, msg.cell);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          afterSeaStep(session, outcome.concluded ? { gameState: outcome.gameState, concluded: outcome.concluded } : cascadeAiSeaBattle(outcome.gameState));
+          broadcastGameState(session);
+          break;
+        }
+        case 'propose_sea_simulate': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = proposeSeaSimulation(session.gameState, playerId);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          // Eine beteiligte KI stimmt sofort zu (cascadeAiSeaBattle).
+          afterSeaStep(session, outcome.concluded ? { gameState: outcome.gameState, concluded: outcome.concluded } : cascadeAiSeaBattle(outcome.gameState));
+          broadcastGameState(session);
+          break;
+        }
+        case 'decline_sea_simulate': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = declineSeaSimulation(session.gameState, playerId);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          session.gameState = outcome.gameState;
+          broadcastGameState(session);
+          break;
+        }
+        case 'cancel_sea_battle': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = cancelSeaBattle(session.gameState, playerId);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          session.gameState = outcome.gameState;
           broadcastGameState(session);
           break;
         }
@@ -292,7 +400,9 @@ wss.on('connection', (ws) => {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
-          const outcome = startBattle(session.gameState, playerId, msg.fromId, msg.toId, session.territories);
+          const outcome = isSeaZoneId(session.seaZones, msg.fromId)
+            ? startAmphibiousBattle(session.gameState, playerId, msg.fromId, msg.toId, session.seaZones)
+            : startBattle(session.gameState, playerId, msg.fromId, msg.toId, session.territories);
           if (!outcome.ok) throw new Error(outcome.reason);
           session.gameState = outcome.gameState;
           session.pendingDeployment = {};
@@ -436,6 +546,26 @@ wss.on('connection', (ws) => {
           broadcastGameState(session);
           break;
         }
+        case 'propose_battle_draw': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = proposeBattleDraw(session.gameState, playerId);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          let state = outcome.gameState;
+          let concluded = outcome.concluded;
+          // Eine beteiligte KI antwortet sofort auf das Angebot.
+          if (!concluded) {
+            const reply = respondAiToDrawOffers(state);
+            state = reply.gameState;
+            concluded = reply.concluded;
+          }
+          session.gameState = state;
+          if (concluded) broadcastBattle(session, concluded);
+          continueStalledAiTurn(session);
+          broadcastGameState(session);
+          break;
+        }
         case 'end_battle_turn': {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
@@ -490,6 +620,36 @@ wss.on('connection', (ws) => {
           broadcastGameState(session);
           break;
         }
+        case 'propose_alliance': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = proposeAlliance(session.gameState, playerId, msg.targetId);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          session.gameState = outcome.gameState;
+          broadcastGameState(session);
+          break;
+        }
+        case 'withdraw_alliance_proposal': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = withdrawAllianceProposal(session.gameState, playerId, msg.targetId);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          session.gameState = outcome.gameState;
+          broadcastGameState(session);
+          break;
+        }
+        case 'leave_alliance': {
+          if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
+          const session = sessions.get(sessionCode);
+          if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
+          const outcome = leaveAlliance(session.gameState, playerId);
+          if (!outcome.ok) throw new Error(outcome.reason);
+          session.gameState = outcome.gameState;
+          broadcastGameState(session);
+          break;
+        }
         case 'unlock_ground_tech': {
           if (!sessionCode || !playerId) throw new Error('Noch keiner Session beigetreten.');
           const session = sessions.get(sessionCode);
@@ -526,7 +686,7 @@ wss.on('connection', (ws) => {
           if (!session?.gameState) throw new Error('Das Spiel läuft noch nicht.');
           // Computed from session.gameState (the authoritative, unfiltered state) and sent only to
           // this one socket - viewer-specific intel, never broadcast to the rest of the session.
-          const estimate = estimateForces(session.gameState, msg.targetId);
+          const estimate = estimateForces(session.gameState, msg.targetId, playerId);
           send(ws, { type: 'force_estimate', targetId: msg.targetId, estimate });
           break;
         }

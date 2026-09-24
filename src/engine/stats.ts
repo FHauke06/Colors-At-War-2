@@ -1,14 +1,11 @@
 import type { GameState, PlayerStats, UnitComposition } from './types';
-import { totalUnits } from './movement';
+import { playerForce, totalUnits } from './movement';
 
 /** Live snapshot (not cumulative, unlike PlayerStats) of a player's current troop count across
- *  every territory they hold right now - for the end-of-game stats screen's "Truppen" column. */
+ *  every territory they hold right now, plus whatever they have stationed on an ally's - for the
+ *  end-of-game stats screen's "Truppen" column. */
 export function totalTroopsFor(gameState: GameState, playerId: string): number {
-  let total = 0;
-  for (const state of gameState.territoryState.values()) {
-    if (state.ownerId === playerId) total += totalUnits(state.garrison);
-  }
-  return total;
+  return totalUnits(playerForce(gameState, playerId));
 }
 
 /** Live snapshot of a player's current factory count across every territory they hold right now -

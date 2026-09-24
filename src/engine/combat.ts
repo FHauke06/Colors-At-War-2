@@ -1,7 +1,20 @@
-import type { BattlePlacement, BattleSubState, BattleSubTerritory, BattleTerrain, CalledAircraft, GameState, PendingBattle, Territory, UnitComposition } from './types';
-import { addGarrisons, subtractGarrisons, totalUnits, availableToMove, splitExtraMoveUnits } from './movement';
+import type { BattlePlacement, BattleSubState, BattleSubTerritory, BattleTerrain, CalledAircraft, GameState, PendingBattle, Territory, TerritoryState, UnitComposition } from './types';
+import {
+  addGarrisons,
+  subtractGarrisons,
+  totalUnits,
+  availableToMove,
+  splitExtraMoveUnits,
+  stackOf,
+  withStack,
+  depositUnits,
+  guestsOf,
+  defenderForce,
+  setDefenderForce,
+  splitAmongStacks,
+} from './movement';
 import { pickRandomBattleMap, type BattleMap } from '../data/BattleMaps';
-import { areAtWar } from './diplomacy';
+import { areAllied, areAtWar } from './diplomacy';
 import { recordBattleOutcome, addToPlayerStats } from './stats';
 import { isSupportUnlocked } from './research';
 import {
@@ -129,7 +142,7 @@ function pickCityIds(cells: readonly Omit<BattleSubTerritory, 'isCity'>[]): Set<
  *  are excluded from every neighbor list on every side - nothing can ever stand on or pass through
  *  one. 6 cities, all in the defender's zone (see pickCityIds), are the attacker's alternate win
  *  condition - the defender has none of their own to lose. */
-function generateSubTerritories(map: BattleMap): BattleSubTerritory[] {
+export function generateSubTerritories(map: BattleMap): BattleSubTerritory[] {
   const terrainByCell = expandTerrain(map);
   const terrainAt = (row: number, col: number): BattleTerrain => terrainByCell.get(subTerritoryId(row, col)) ?? 'normal';
 
@@ -215,6 +228,9 @@ export type StartBattleOutcome =
  * Declares an attack: records who's fighting over what and each side's available force, and lays
  * out the tactical sub-map - but doesn't touch territoryState yet, and subState stays null until
  * both sides have deployed. Blocks (like every other action) while a battle is already pending.
+ * The attack may launch from the attacker's own territory or from an ally's they're stationed on
+ * (see TerritoryState.guests); the defending force is the territory owner's garrison together with
+ * every allied guest standing there, fighting as one under the owner's command.
  */
 export function startBattle(
   gameState: GameState,
@@ -223,7 +239,7 @@ export function startBattle(
   toId: string,
   territories: readonly Territory[],
 ): StartBattleOutcome {
-  if (gameState.pendingBattle) return { ok: false, reason: 'Es läuft bereits ein Kampf.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Es läuft bereits ein Kampf.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
 
   const fromTerritory = territories.find((t) => t.id === fromId);
@@ -231,18 +247,20 @@ export function startBattle(
   if (!fromTerritory.neighbors.includes(toId)) return { ok: false, reason: 'Gebiete sind nicht benachbart.' };
 
   const fromState = gameState.territoryState.get(fromId);
-  if (!fromState || fromState.ownerId !== playerId) return { ok: false, reason: 'Das Gebiet gehört dir nicht.' };
-  const attackerMax = availableToMove(fromState);
+  const fromStack = fromState ? stackOf(fromState, playerId) : null;
+  if (!fromState || !fromStack) return { ok: false, reason: 'Das Gebiet gehört dir nicht.' };
+  const attackerMax = availableToMove(fromStack);
   if (totalUnits(attackerMax) === 0) {
     return { ok: false, reason: 'Nicht genug verfügbare Einheiten - manche haben sich diese Runde schon bewegt.' };
   }
 
   const toState = gameState.territoryState.get(toId);
   if (!toState) return { ok: false, reason: `Unbekanntes Gebiet "${toId}".` };
-  if (toState.ownerId === null || toState.ownerId === playerId) {
+  if (toState.ownerId === null || toState.ownerId === playerId || areAllied(gameState, playerId, toState.ownerId)) {
     return { ok: false, reason: 'Das Gebiet ist nicht feindlich besetzt - normal verschieben statt angreifen.' };
   }
-  if (totalUnits(toState.garrison) === 0) {
+  const defenders = defenderForce(toState);
+  if (totalUnits(defenders) === 0) {
     return { ok: false, reason: 'Das Gebiet ist unverteidigt - normal verschieben statt angreifen.' };
   }
   if (!areAtWar(gameState, playerId, toState.ownerId)) {
@@ -256,7 +274,7 @@ export function startBattle(
     attackerId: playerId,
     defenderId: toState.ownerId,
     attackerMax,
-    defenderMax: toState.garrison,
+    defenderMax: defenders,
     attackerDeployed: false,
     defenderDeployed: false,
     battleMapName: battleMap.name,
@@ -295,7 +313,7 @@ export function simulateAttack(
   toId: string,
   territories: readonly Territory[],
 ): SimulateAttackOutcome {
-  if (gameState.pendingBattle) return { ok: false, reason: 'Es läuft bereits ein Kampf.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Es läuft bereits ein Kampf.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
 
   const fromTerritory = territories.find((t) => t.id === fromId);
@@ -303,18 +321,21 @@ export function simulateAttack(
   if (!fromTerritory.neighbors.includes(toId)) return { ok: false, reason: 'Gebiete sind nicht benachbart.' };
 
   const fromState = gameState.territoryState.get(fromId);
-  if (!fromState || fromState.ownerId !== playerId) return { ok: false, reason: 'Das Gebiet gehört dir nicht.' };
-  const attackerForce = availableToMove(fromState);
+  const fromStack = fromState ? stackOf(fromState, playerId) : null;
+  if (!fromState || !fromStack) return { ok: false, reason: 'Das Gebiet gehört dir nicht.' };
+  const attackerForce = availableToMove(fromStack);
   if (totalUnits(attackerForce) === 0) {
     return { ok: false, reason: 'Nicht genug verfügbare Einheiten - manche haben sich diese Runde schon bewegt.' };
   }
 
   const toState = gameState.territoryState.get(toId);
   if (!toState) return { ok: false, reason: `Unbekanntes Gebiet "${toId}".` };
-  if (toState.ownerId === null || toState.ownerId === playerId) {
+  if (toState.ownerId === null || toState.ownerId === playerId || areAllied(gameState, playerId, toState.ownerId)) {
     return { ok: false, reason: 'Das Gebiet ist nicht feindlich besetzt - normal verschieben statt angreifen.' };
   }
-  if (totalUnits(toState.garrison) === 0) {
+  // The owner's garrison and any allied guests defend as one force - and share the outcome.
+  const defenders = defenderForce(toState);
+  if (totalUnits(defenders) === 0) {
     return { ok: false, reason: 'Das Gebiet ist unverteidigt - normal verschieben statt angreifen.' };
   }
   if (!areAtWar(gameState, playerId, toState.ownerId)) {
@@ -322,19 +343,27 @@ export function simulateAttack(
   }
 
   const attackerStrength = battleStrength(attackerForce);
-  const defenderStrength = battleStrength(toState.garrison) * SIMULATED_DEFENSE_MULTIPLIER;
+  const defenderStrength = battleStrength(defenders) * SIMULATED_DEFENSE_MULTIPLIER;
   const attackerWon = Math.random() < attackerStrength / (attackerStrength + defenderStrength);
 
   const nextTerritoryState = new Map(gameState.territoryState);
-  nextTerritoryState.set(fromId, { ...fromState, garrison: subtractGarrisons(fromState.garrison, attackerForce) });
+  nextTerritoryState.set(
+    fromId,
+    withStack(fromState, playerId, {
+      garrison: subtractGarrisons(fromStack.garrison, attackerForce),
+      movedIn: fromStack.movedIn,
+      extraMoveUsed: fromStack.extraMoveUsed,
+    }),
+  );
   if (attackerWon) {
+    // The wiped-out defenders take any guests standing with them along - none survive to stay.
     const survivors = reduceByStrength(attackerForce, defenderStrength);
     nextTerritoryState.set(toId, { ownerId: playerId, garrison: survivors, movedIn: survivors, extraMoveUsed: EMPTY_GARRISON });
   } else {
     // The defender's toughness bonus applies twice over: it made winning the roll more likely,
     // and it halves the damage they actually take in doing so (SIMULATED_DEFENSE_MULTIPLIER).
-    const survivors = reduceByStrength(toState.garrison, attackerStrength / SIMULATED_DEFENSE_MULTIPLIER);
-    nextTerritoryState.set(toId, { ...toState, garrison: survivors });
+    const survivors = reduceByStrength(defenders, attackerStrength / SIMULATED_DEFENSE_MULTIPLIER);
+    nextTerritoryState.set(toId, setDefenderForce(toState, survivors, false));
   }
 
   const statefulGameState = recordBattleOutcome(
@@ -346,15 +375,15 @@ export function simulateAttack(
           attackerWon: true,
           winnerStarting: attackerForce,
           winnerSurviving: reduceByStrength(attackerForce, defenderStrength),
-          loserStarting: toState.garrison,
+          loserStarting: defenders,
           loserRetained: EMPTY_GARRISON,
         }
       : {
           winnerId: toState.ownerId,
           loserId: playerId,
           attackerWon: false,
-          winnerStarting: toState.garrison,
-          winnerSurviving: reduceByStrength(toState.garrison, attackerStrength / SIMULATED_DEFENSE_MULTIPLIER),
+          winnerStarting: defenders,
+          winnerSurviving: reduceByStrength(defenders, attackerStrength / SIMULATED_DEFENSE_MULTIPLIER),
           loserStarting: attackerForce,
           loserRetained: EMPTY_GARRISON,
         },
@@ -421,9 +450,43 @@ export function beginBattlePhase(
   }
 
   const committed = sumComposition(attackerPlacements.map((p) => p.amount));
+  if (pending.fromSeaZone) {
+    // Landungsangriff: die Truppen verlassen die Schiffe (eingeschiffte Einheiten der Seezone).
+    const zone = gameState.seaZones.get(pending.fromId);
+    const nextSeaZones = new Map(gameState.seaZones);
+    if (zone) {
+      const embarked = subtractGarrisons(zone.embarked, committed);
+      nextSeaZones.set(pending.fromId, {
+        ...zone,
+        embarked,
+        embarkedMovedIn: {
+          infantry: Math.min(zone.embarkedMovedIn.infantry, embarked.infantry),
+          lightTank: Math.min(zone.embarkedMovedIn.lightTank, embarked.lightTank),
+          heavyTank: Math.min(zone.embarkedMovedIn.heavyTank, embarked.heavyTank),
+          artillery: Math.min(zone.embarkedMovedIn.artillery, embarked.artillery),
+          motorizedInfantry: Math.min(zone.embarkedMovedIn.motorizedInfantry, embarked.motorizedInfantry),
+        },
+      });
+    }
+    return {
+      ...gameState,
+      seaZones: nextSeaZones,
+      pendingBattle: { ...pending, subState, activeSide: 'defender', battleRound: 1 },
+    };
+  }
   const nextTerritoryState = new Map(gameState.territoryState);
   const fromState = gameState.territoryState.get(pending.fromId)!;
-  nextTerritoryState.set(pending.fromId, { ...fromState, garrison: subtractGarrisons(fromState.garrison, committed) });
+  const fromStack = stackOf(fromState, pending.attackerId);
+  if (fromStack) {
+    nextTerritoryState.set(
+      pending.fromId,
+      withStack(fromState, pending.attackerId, {
+        garrison: subtractGarrisons(fromStack.garrison, committed),
+        movedIn: fromStack.movedIn,
+        extraMoveUsed: fromStack.extraMoveUsed,
+      }),
+    );
+  }
 
   return {
     ...gameState,
@@ -442,6 +505,10 @@ export interface BattleResult {
    *  territory ends up unowned, not defender-owned). ui/GameScreen.ts's showBattleConcluded checks
    *  this to show a distinct "mutually annihilated" message instead of the usual win/lose one. */
   readonly nuked?: boolean;
+  /** Nur bei einer Seeschlacht (engine/naval.ts) gesetzt: `territoryId` ist dann die Seezone. */
+  readonly sea?: true;
+  /** Gesetzt, wenn die Schlacht durch ein beidseitig bestätigtes Unentschieden endete (proposeBattleDraw). */
+  readonly draw?: true;
 }
 
 function sideTotalUnits(subState: ReadonlyMap<string, BattleSubState>, ownerId: string): number {
@@ -519,39 +586,71 @@ function retreatableCellIds(
 
 /** Where the loser's retreating survivors land on the main map: the attacker always falls back to
  *  where they launched the assault from; the defender falls back to any other territory of their
- *  own bordering the contested one (not the attacker's launch point). Null if no such territory
- *  exists - nowhere safe to send them, regardless of whether the sub-map path was clear. */
+ *  own bordering the contested one (not the attacker's launch point) - or, failing that, onto an
+ *  ally's, where they stand as guests. Null if no such territory exists - nowhere safe to send
+ *  them, regardless of whether the sub-map path was clear. */
 function retreatDestination(
   gameState: GameState,
   pending: PendingBattle,
   loserId: string,
   territories: readonly Territory[],
 ): string | null {
-  if (loserId === pending.attackerId) return pending.fromId;
+  // Ein geschlagener Landungsangriff kann nicht auf die Schiffe zurück - die Truppen sind verloren.
+  if (loserId === pending.attackerId) return pending.fromSeaZone ? null : pending.fromId;
   const contested = territories.find((t) => t.id === pending.territoryId);
   if (!contested) return null;
-  const candidate = contested.neighbors.find(
-    (id) => id !== pending.fromId && gameState.territoryState.get(id)?.ownerId === loserId,
-  );
-  return candidate ?? null;
+  const candidates = contested.neighbors.filter((id) => id !== pending.fromId);
+  const ownerOf = (id: string): string | null => gameState.territoryState.get(id)?.ownerId ?? null;
+  const home = candidates.find((id) => ownerOf(id) === loserId);
+  if (home) return home;
+  return candidates.find((id) => {
+    const owner = ownerOf(id);
+    return owner !== null && areAllied(gameState, loserId, owner);
+  }) ?? null;
+}
+
+/** Splits `total` - some part of a territory's defending force, e.g. its survivors - back among
+ *  whoever contributed it: the owner's garrison and every allied guest's, in proportion to what
+ *  each had there (see splitAmongStacks). */
+function shareOutDefenders(
+  state: TerritoryState,
+  ownerId: string,
+  total: UnitComposition,
+): readonly { readonly playerId: string; readonly share: UnitComposition }[] {
+  const guests = guestsOf(state);
+  const shares = splitAmongStacks(total, [state.garrison, ...guests.map((g) => g.garrison)]);
+  return [
+    { playerId: ownerId, share: shares[0]! },
+    ...guests.map((guest, i) => ({ playerId: guest.playerId, share: shares[i + 1]! })),
+  ];
 }
 
 /**
  * Folds a concluded tactical battle back into the macro map: the winner's combined survivors
  * (summed across every sub-territory they still hold) become the new garrison at the contested
- * territory - spent for this round either way, having just fought. The loser's survivors that had
- * a clear path to an escape row (see retreatableCellIds) fall back onto a neighboring territory of
- * their own instead of being lost outright, if one exists (retreatDestination); everything else -
- * cut off, or with nowhere to retreat to - is lost along with the battle.
+ * territory - spent for this round either way, having just fought. A defender who holds the ground
+ * keeps it together with the allied guests who fought beside them, each getting their share of the
+ * survivors back (setDefenderForce); a conquering attacker takes it over alone. The loser's
+ * survivors that had a clear path to an escape row (see retreatableCellIds) fall back onto a
+ * neighboring territory instead of being lost outright, if one exists (retreatDestination) - a
+ * defeated defense's guests retreating along with their host, each as their own units or as guests
+ * wherever they land; everything else - cut off, or with nowhere to retreat to - is lost along with
+ * the battle.
  */
 function applyConclusion(gameState: GameState, result: BattleResult, territories: readonly Territory[]): GameState {
   const pending = gameState.pendingBattle!;
   const winnerId = result.attackerWon ? pending.attackerId : pending.defenderId;
   const loserId = result.attackerWon ? pending.defenderId : pending.attackerId;
   const survivors = subTerritoriesOwnedBy(pending.subState!, winnerId);
+  const contested = gameState.territoryState.get(pending.territoryId)!;
 
   const nextTerritoryState = new Map(gameState.territoryState);
-  nextTerritoryState.set(pending.territoryId, { ownerId: winnerId, garrison: survivors, movedIn: survivors, extraMoveUsed: EMPTY_GARRISON });
+  nextTerritoryState.set(
+    pending.territoryId,
+    result.attackerWon
+      ? { ownerId: winnerId, garrison: survivors, movedIn: survivors, extraMoveUsed: EMPTY_GARRISON }
+      : setDefenderForce(contested, survivors, true),
+  );
 
   const retreatable = retreatableCellIds(pending.subTerritories, pending.subState!, loserId);
   let retreatingUnits = EMPTY_GARRISON;
@@ -559,16 +658,15 @@ function applyConclusion(gameState: GameState, result: BattleResult, territories
     retreatingUnits = sumGarrisonsAt(pending.subState!, retreatable);
     const destinationId = totalUnits(retreatingUnits) > 0 ? retreatDestination(gameState, pending, loserId, territories) : null;
     if (destinationId) {
-      const destState = gameState.territoryState.get(destinationId)!;
-      const baseGarrison = destState.ownerId === loserId ? destState.garrison : EMPTY_GARRISON;
-      const baseMovedIn = destState.ownerId === loserId ? destState.movedIn : EMPTY_GARRISON;
-      const baseExtraMoveUsed = destState.ownerId === loserId ? destState.extraMoveUsed : EMPTY_GARRISON;
-      nextTerritoryState.set(destinationId, {
-        ownerId: loserId,
-        garrison: addGarrisons(baseGarrison, retreatingUnits),
-        movedIn: addGarrisons(baseMovedIn, retreatingUnits),
-        extraMoveUsed: baseExtraMoveUsed,
-      });
+      const arrivals =
+        loserId === pending.attackerId
+          ? [{ playerId: loserId, share: retreatingUnits }]
+          : shareOutDefenders(contested, loserId, retreatingUnits);
+      let landed = gameState.territoryState.get(destinationId)!;
+      for (const { playerId, share } of arrivals) {
+        if (totalUnits(share) > 0) landed = depositUnits(landed, playerId, share);
+      }
+      nextTerritoryState.set(destinationId, landed);
     }
   }
 
@@ -589,6 +687,73 @@ function applyConclusion(gameState: GameState, result: BattleResult, territories
 
   const withAircraftReturned = returnAllCalledAircraftToBase(statefulGameState, pending);
   return { ...withAircraftReturned, pendingBattle: null };
+}
+
+export type DrawOutcome =
+  | { readonly ok: true; readonly gameState: GameState; readonly concluded: BattleResult | null }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Bietet ein Unentschieden an (oder stimmt einem Angebot zu): setzt das Angebot der eigenen Seite. Erlaubt für beide
+ * Kämpfer jederzeit in der Kampfphase (nach der Aufstellung), unabhängig davon, wer am Zug ist; wiederholtes Anbieten
+ * ist harmlos. Haben BEIDE Seiten angeboten, endet die Schlacht UNVERÄNDERT (applyDraw): kein Gebiet wechselt den
+ * Besitzer, der volle Restbestand beider Seiten bleibt erhalten.
+ */
+export function proposeBattleDraw(gameState: GameState, playerId: string): DrawOutcome {
+  const pending = gameState.pendingBattle;
+  if (!pending) return { ok: false, reason: 'Kein Kampf im Gange.' };
+  if (!pending.subState) return { ok: false, reason: 'Ein Unentschieden ist erst nach der Aufstellung möglich.' };
+  const side = pending.attackerId === playerId ? 'attacker' : pending.defenderId === playerId ? 'defender' : null;
+  if (!side) return { ok: false, reason: 'Du bist an diesem Kampf nicht beteiligt.' };
+
+  const next: PendingBattle = { ...pending, ...(side === 'attacker' ? { attackerDrawOffer: true as const } : { defenderDrawOffer: true as const }) };
+  if (next.attackerDrawOffer && next.defenderDrawOffer) {
+    const result: BattleResult = { territoryId: pending.territoryId, attackerId: pending.attackerId, defenderId: pending.defenderId, attackerWon: false, draw: true };
+    return { ok: true, gameState: applyDraw({ ...gameState, pendingBattle: next }), concluded: result };
+  }
+  return { ok: true, gameState: { ...gameState, pendingBattle: next }, concluded: null };
+}
+
+/**
+ * Beendet die Schlacht unverändert. Der Angreifer verliert nichts außer dem, was im Kampf schon gefallen ist: seine
+ * überlebenden Einheiten (alles, was noch auf dem Schlachtfeld steht) kehren an ihren Ausgangsort zurück (Landgebiet,
+ * bzw. bei einem Landungsangriff an Bord der Seezone) und gelten als bewegt. Beim Verteidiger wird die Garnison des
+ * umkämpften Gebiets (samt verbündeter Gäste) auf seine überlebenden Einheiten gesetzt - das Gebiet bleibt seins.
+ * Es gibt keine Statistik (weder Sieg noch Niederlage), Luftunterstützung fliegt zurück zur Basis.
+ */
+function applyDraw(gameState: GameState): GameState {
+  const pending = gameState.pendingBattle!;
+  const attackerRemaining = subTerritoriesOwnedUnits(pending.subState!, pending.attackerId);
+  const defenderRemaining = subTerritoriesOwnedUnits(pending.subState!, pending.defenderId);
+
+  const nextTerritoryState = new Map(gameState.territoryState);
+  const contested = gameState.territoryState.get(pending.territoryId)!;
+  nextTerritoryState.set(pending.territoryId, setDefenderForce(contested, defenderRemaining, false));
+
+  let next: GameState = { ...gameState, territoryState: nextTerritoryState };
+  if (totalUnits(attackerRemaining) > 0) {
+    if (pending.fromSeaZone) {
+      const zone = gameState.seaZones.get(pending.fromId);
+      if (zone) {
+        const seaZones = new Map(gameState.seaZones);
+        seaZones.set(pending.fromId, {
+          ...zone,
+          embarked: addGarrisons(zone.embarked, attackerRemaining),
+          embarkedMovedIn: addGarrisons(zone.embarkedMovedIn, attackerRemaining),
+        });
+        next = { ...next, seaZones };
+      }
+    } else {
+      const from = nextTerritoryState.get(pending.fromId)!;
+      nextTerritoryState.set(pending.fromId, depositUnits(from, pending.attackerId, attackerRemaining));
+    }
+  }
+  return { ...returnAllCalledAircraftToBase(next, pending), pendingBattle: null };
+}
+
+/** Alle Einheiten eines Spielers auf dem Schlachtfeld (Summe über die Felder, die er gerade hält). */
+function subTerritoriesOwnedUnits(subState: ReadonlyMap<string, BattleSubState>, ownerId: string): UnitComposition {
+  return subTerritoriesOwnedBy(subState, ownerId);
 }
 
 /** Returns every one of `pending`'s called-in aircraft straight to its home airfield, regardless of
@@ -1038,7 +1203,9 @@ export type UseNukeOutcome =
  * Ends the current tactical battle instantly by wiping every unit on the sub-map - the caller's
  * own included, not just the enemy's ("zerstört alle Einheiten in der Schlacht, auch
  * freundliche"). Costs NUKE_USE_COST Rüstungspunkte on top of having researched 'nuke' at all (see
- * engine/research.ts's SUPPORT_TECH_TREE). Unlike an ordinary conclusion (applyConclusion), there
+ * engine/research.ts's SUPPORT_TECH_TREE), and one warhead off gameState.nukeStockpiles when the
+ * caller has an entry there at all (most don't - see GameState.nukeStockpiles' doc comment - and
+ * fire as often as they can afford, same as before this existed). Unlike an ordinary conclusion (applyConclusion), there
  * is no winner: the contested territory ends up unowned rather than credited to either side, and
  * no battlesWon/territoriesConquered goes to anyone - just each side's actual losses (whatever was
  * still alive on the grid the instant the bomb went off, not merely what was originally
@@ -1056,14 +1223,17 @@ export function useNuke(gameState: GameState, playerId: string): UseNukeOutcome 
 
   const balance = gameState.resources.get(playerId) ?? 0;
   if (balance < NUKE_USE_COST) return { ok: false, reason: 'Nicht genug Rüstungspunkte für eine Atombombe.' };
+  const stockpile = gameState.nukeStockpiles.get(playerId);
+  if (stockpile !== undefined && stockpile <= 0) return { ok: false, reason: 'Kein Sprengkopf mehr im Arsenal.' };
 
   const attackerLosses = sideTotalUnits(pending.subState, pending.attackerId);
   const defenderLosses = sideTotalUnits(pending.subState, pending.defenderId);
 
   const resources = new Map(gameState.resources);
   resources.set(playerId, balance - NUKE_USE_COST);
+  const nukeStockpiles = stockpile === undefined ? gameState.nukeStockpiles : new Map(gameState.nukeStockpiles).set(playerId, stockpile - 1);
 
-  let state = addToPlayerStats({ ...gameState, resources }, pending.attackerId, { unitsLost: attackerLosses });
+  let state = addToPlayerStats({ ...gameState, resources, nukeStockpiles }, pending.attackerId, { unitsLost: attackerLosses });
   state = addToPlayerStats(state, pending.defenderId, { unitsLost: defenderLosses });
 
   const nextTerritoryState = new Map(state.territoryState);
@@ -1131,7 +1301,11 @@ export function escapeBattle(
   }
   const destState = gameState.territoryState.get(destinationId);
   if (!destState) return { ok: false, reason: `Unbekanntes Gebiet "${destinationId}".` };
-  if (destState.ownerId !== null && destState.ownerId !== playerId && totalUnits(destState.garrison) > 0) {
+  // Unowned, own and allied ground can be landed on (an ally's as guests, see TerritoryState.guests);
+  // anyone else's only if nothing at all defends it - neither a garrison nor allied guests.
+  const friendlyGround =
+    destState.ownerId === null || destState.ownerId === playerId || areAllied(gameState, playerId, destState.ownerId);
+  if (!friendlyGround && totalUnits(defenderForce(destState)) > 0) {
     return { ok: false, reason: 'Dieses Gebiet ist verteidigt - dorthin kann man nicht entkommen.' };
   }
 
@@ -1139,15 +1313,12 @@ export function escapeBattle(
   nextSubState.set(fromSubId, { ...fromState, garrison: subtractGarrisons(fromState.garrison, amount) });
 
   const nextTerritoryState = new Map(gameState.territoryState);
-  const baseGarrison = destState.ownerId === playerId ? destState.garrison : EMPTY_GARRISON;
-  const baseMovedIn = destState.ownerId === playerId ? destState.movedIn : EMPTY_GARRISON;
-  const baseExtraMoveUsed = destState.ownerId === playerId ? destState.extraMoveUsed : EMPTY_GARRISON;
-  nextTerritoryState.set(destinationId, {
-    ownerId: playerId,
-    garrison: addGarrisons(baseGarrison, amount),
-    movedIn: addGarrisons(baseMovedIn, amount),
-    extraMoveUsed: baseExtraMoveUsed,
-  });
+  nextTerritoryState.set(
+    destinationId,
+    friendlyGround
+      ? depositUnits(destState, playerId, amount)
+      : { ownerId: playerId, garrison: amount, movedIn: amount, extraMoveUsed: EMPTY_GARRISON },
+  );
 
   let nextGameState: GameState = {
     ...gameState,

@@ -1,12 +1,13 @@
-import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, SupportTech, Territory, UnitComposition } from '../engine/types';
+import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, NavalTech, SeaZone, SupportTech, Territory, UnitComposition } from '../engine/types';
 import { addAi, claimCapital, canStart, createLobby, removeAi } from '../engine/session';
 import { mainMapById } from '../data/MainMaps';
 import { buildGameStateFromLobby, buildGameStateFromScenario, lobbyFromScenario } from '../engine/setup';
 import type { Scenario } from '../data/Scenarios/types';
-import { moveUnits } from '../engine/movement';
+import { moveUnitsAnywhere, moveShips as moveShipsEngine, deploySeaFleet as deploySeaFleetEngine, seaShoot as seaShootEngine, cancelSeaBattle as cancelSeaBattleEngine, proposeSeaSimulation as proposeSeaSimulationEngine, declineSeaSimulation as declineSeaSimulationEngine, cascadeAiSeaBattle, startAmphibiousBattle, isSeaZoneId } from '../engine/naval';
+import type { SeaBattleResult } from '../engine/naval';
 import { endTurn, resumeAiTurnIfNeeded } from '../engine/turns';
-import { recruitUnits, buildFactory as buildFactoryEngine, upgradeInfrastructure as upgradeInfrastructureEngine } from '../engine/economy';
-import { unlockGroundTech as unlockGroundTechEngine, unlockAirTech as unlockAirTechEngine, unlockSupportTech as unlockSupportTechEngine } from '../engine/research';
+import { recruitUnits, recruitShips as recruitShipsEngine, buildFactory as buildFactoryEngine, upgradeInfrastructure as upgradeInfrastructureEngine } from '../engine/economy';
+import { unlockNavalTech as unlockNavalTechEngine, unlockGroundTech as unlockGroundTechEngine, unlockAirTech as unlockAirTechEngine, unlockSupportTech as unlockSupportTechEngine } from '../engine/research';
 import {
   startBattle,
   simulateAttack as simulateAttackEngine,
@@ -21,11 +22,20 @@ import {
   casStrike as casStrikeEngine,
   endBattleTurn as endBattleTurnEngine,
   useNuke as useNukeEngine,
+  proposeBattleDraw as proposeBattleDrawEngine,
 } from '../engine/combat';
 import type { BattleResult } from '../engine/combat';
-import { autoDeployForBattle, cascadeAiBattleTurns } from '../engine/ai';
+import { autoDeployForBattle, cascadeAiBattleTurns, respondAiToDrawOffers } from '../engine/ai';
 import type { PendingAiDeployment } from '../engine/ai';
-import { declareWar as declareWarEngine, proposePact as proposePactEngine, cancelPact as cancelPactEngine, withdrawPactProposal as withdrawPactProposalEngine } from '../engine/diplomacy';
+import {
+  declareWar as declareWarEngine,
+  proposePact as proposePactEngine,
+  cancelPact as cancelPactEngine,
+  withdrawPactProposal as withdrawPactProposalEngine,
+  proposeAlliance as proposeAllianceEngine,
+  withdrawAllianceProposal as withdrawAllianceProposalEngine,
+  leaveAlliance as leaveAllianceEngine,
+} from '../engine/diplomacy';
 import {
   buildAirfield as buildAirfieldEngine,
   upgradeAirfield as upgradeAirfieldEngine,
@@ -50,6 +60,7 @@ export class LocalGameClient implements GameClient {
   private lobby: LobbyState;
   private gameState: GameState | null = null;
   private readonly territories: readonly Territory[];
+  private readonly seaZones: readonly SeaZone[];
   /** Set only for a scenario game (see fromScenario) - start() branches on this to build the
    *  scenario's full pre-populated GameState instead of the normal "one empty capital each". */
   private readonly scenario: Scenario | null;
@@ -57,7 +68,7 @@ export class LocalGameClient implements GameClient {
   private readonly startListeners = new Set<(gameState: GameState) => void>();
   private readonly stateListeners = new Set<(gameState: GameState) => void>();
   private readonly errorListeners = new Set<(message: string) => void>();
-  private readonly battleListeners = new Set<(battle: BattleResult) => void>();
+  private readonly battleListeners = new Set<(battle: BattleResult | SeaBattleResult) => void>();
   private readonly forceEstimateListeners = new Set<(targetId: string, estimate: ForceEstimate) => void>();
   /** Deployment for the current pending battle, kept out of gameState so it's never broadcast -
    *  holds this session's human placement while waiting on the AI, or the AI's own blind placement
@@ -65,8 +76,9 @@ export class LocalGameClient implements GameClient {
   private attackerDeployment: readonly BattlePlacement[] | null = null;
   private defenderDeployment: readonly BattlePlacement[] | null = null;
 
-  private constructor(territories: readonly Territory[], lobby: LobbyState, scenario: Scenario | null = null) {
+  private constructor(territories: readonly Territory[], seaZones: readonly SeaZone[], lobby: LobbyState, scenario: Scenario | null = null) {
     this.territories = territories;
+    this.seaZones = seaZones;
     this.lobby = lobby;
     this.scenario = scenario;
   }
@@ -74,10 +86,11 @@ export class LocalGameClient implements GameClient {
   /** Normal offline game: an empty map where every seat (the human, then each added AI) still
    *  needs a capital before start() will do anything. */
   static newLobby(mapId: string, hostName: string, aiCount: number, aiDifficulty: AiDifficulty = 'medium'): LocalGameClient {
-    const territories = mainMapById(mapId).territories;
+    const map = mainMapById(mapId);
+    const territories = map.territories;
     let lobby = createLobby('LOKAL', 1, LOCAL_PLAYER_ID, hostName, mapId, aiDifficulty);
     for (let i = 0; i < aiCount; i++) lobby = addAi(lobby, territories);
-    return new LocalGameClient(territories, lobby);
+    return new LocalGameClient(territories, map.seaZones, lobby);
   }
 
   /** Scenario game (see data/Scenarios): every faction's territories/garrisons/resources are
@@ -85,9 +98,10 @@ export class LocalGameClient implements GameClient {
    *  difficulty for the rest. start() skips straight to buildGameStateFromScenario; there's no
    *  capital-claiming lobby step. */
   static fromScenario(scenario: Scenario, humanFactionIndex: number, humanName: string, aiDifficulty: AiDifficulty): LocalGameClient {
-    const territories = mainMapById(scenario.mapId).territories;
+    const map = mainMapById(scenario.mapId);
+    const territories = map.territories;
     const lobby = lobbyFromScenario(scenario, humanFactionIndex, LOCAL_PLAYER_ID, humanName, aiDifficulty);
-    return new LocalGameClient(territories, lobby, scenario);
+    return new LocalGameClient(territories, map.seaZones, lobby, scenario);
   }
 
   getLobby(): LobbyState {
@@ -114,7 +128,7 @@ export class LocalGameClient implements GameClient {
     return () => this.errorListeners.delete(cb);
   }
 
-  onBattle(cb: (battle: BattleResult) => void): () => void {
+  onBattle(cb: (battle: BattleResult | SeaBattleResult) => void): () => void {
     this.battleListeners.add(cb);
     return () => this.battleListeners.delete(cb);
   }
@@ -153,7 +167,7 @@ export class LocalGameClient implements GameClient {
   /** The authoritative gameState filtered down to what this session's one local human may see -
    *  see engine/visibility.ts. Always call this instead of handing out `this.gameState` raw. */
   private visibleState(): GameState {
-    return filterGameStateForViewer(this.gameState!, this.playerId, this.territories);
+    return filterGameStateForViewer(this.gameState!, this.playerId, this.territories, this.seaZones);
   }
 
   private notifyState(): void {
@@ -163,7 +177,7 @@ export class LocalGameClient implements GameClient {
 
   moveUnits(fromId: string, toId: string, amount: UnitComposition): void {
     if (!this.gameState) return;
-    const outcome = moveUnits(this.gameState, this.playerId, fromId, toId, this.territories, amount);
+    const outcome = moveUnitsAnywhere(this.gameState, this.playerId, fromId, toId, this.territories, this.seaZones, amount);
     if (!outcome.ok) {
       this.errorListeners.forEach((cb) => cb(outcome.reason));
       return;
@@ -174,7 +188,9 @@ export class LocalGameClient implements GameClient {
 
   attack(fromId: string, toId: string): void {
     if (!this.gameState) return;
-    const outcome = startBattle(this.gameState, this.playerId, fromId, toId, this.territories);
+    const outcome = isSeaZoneId(this.seaZones, fromId)
+      ? startAmphibiousBattle(this.gameState, this.playerId, fromId, toId, this.seaZones)
+      : startBattle(this.gameState, this.playerId, fromId, toId, this.territories);
     if (!outcome.ok) {
       this.errorListeners.forEach((cb) => cb(outcome.reason));
       return;
@@ -324,6 +340,27 @@ export class LocalGameClient implements GameClient {
     this.notifyState();
   }
 
+  proposeBattleDraw(): void {
+    if (!this.gameState) return;
+    const outcome = proposeBattleDrawEngine(this.gameState, this.playerId);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    let state = outcome.gameState;
+    let concluded = outcome.concluded;
+    // Eine beteiligte KI antwortet sofort auf das Angebot.
+    if (!concluded) {
+      const reply = respondAiToDrawOffers(state);
+      state = reply.gameState;
+      concluded = reply.concluded;
+    }
+    this.gameState = state;
+    if (concluded) this.battleListeners.forEach((cb) => cb(concluded!));
+    this.continueStalledAiTurn();
+    this.notifyState();
+  }
+
   endBattleTurn(): void {
     if (!this.gameState) return;
     const outcome = endBattleTurnEngine(this.gameState, this.playerId, this.territories);
@@ -342,7 +379,7 @@ export class LocalGameClient implements GameClient {
 
   endTurn(): void {
     if (!this.gameState) return;
-    const outcome = endTurn(this.gameState, this.playerId, this.territories);
+    const outcome = endTurn(this.gameState, this.playerId, this.territories, this.seaZones);
     if (!outcome.ok) {
       this.errorListeners.forEach((cb) => cb(outcome.reason));
       return;
@@ -361,7 +398,7 @@ export class LocalGameClient implements GameClient {
    *  concluding, or one still in progress). */
   private continueStalledAiTurn(): void {
     if (!this.gameState) return;
-    const result = resumeAiTurnIfNeeded(this.gameState, this.territories);
+    const result = resumeAiTurnIfNeeded(this.gameState, this.territories, this.seaZones);
     this.gameState = result.gameState;
     this.stashPendingAiDeployment(result.pendingAiDeployment);
   }
@@ -508,6 +545,39 @@ export class LocalGameClient implements GameClient {
     this.notifyState();
   }
 
+  proposeAlliance(targetId: string): void {
+    if (!this.gameState) return;
+    const outcome = proposeAllianceEngine(this.gameState, this.playerId, targetId);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.gameState = outcome.gameState;
+    this.notifyState();
+  }
+
+  withdrawAllianceProposal(targetId: string): void {
+    if (!this.gameState) return;
+    const outcome = withdrawAllianceProposalEngine(this.gameState, this.playerId, targetId);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.gameState = outcome.gameState;
+    this.notifyState();
+  }
+
+  leaveAlliance(): void {
+    if (!this.gameState) return;
+    const outcome = leaveAllianceEngine(this.gameState, this.playerId);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.gameState = outcome.gameState;
+    this.notifyState();
+  }
+
   unlockGroundTech(tech: GroundTech): void {
     if (!this.gameState) return;
     const outcome = unlockGroundTechEngine(this.gameState, this.playerId, tech);
@@ -554,11 +624,114 @@ export class LocalGameClient implements GameClient {
     this.notifyState();
   }
 
+  unlockNavalTech(tech: NavalTech): void {
+    if (!this.gameState) return;
+    const outcome = unlockNavalTechEngine(this.gameState, this.playerId, tech);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.gameState = outcome.gameState;
+    this.notifyState();
+  }
+
+  recruitShips(territoryId: string, count: number): void {
+    if (!this.gameState) return;
+    const outcome = recruitShipsEngine(this.gameState, this.playerId, territoryId, count, this.seaZones);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.gameState = outcome.gameState;
+    this.notifyState();
+  }
+
+  moveShips(fromId: string, toId: string, count: number): void {
+    if (!this.gameState) return;
+    const outcome = moveShipsEngine(this.gameState, this.playerId, fromId, toId, count, this.seaZones);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.gameState = outcome.gameState;
+    // Verteidigt die KI, stellt sie ihre Flotte sofort (verdeckt) auf.
+    if (outcome.battleStarted) this.afterSeaStep(cascadeAiSeaBattle(this.gameState));
+    this.notifyState();
+  }
+
+  deploySeaFleet(cells: readonly number[]): void {
+    if (!this.gameState) return;
+    const outcome = deploySeaFleetEngine(this.gameState, this.playerId, cells);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.afterSeaStep(cascadeAiSeaBattle(outcome.gameState));
+    this.notifyState();
+  }
+
+  seaShoot(cell: number): void {
+    if (!this.gameState) return;
+    const outcome = seaShootEngine(this.gameState, this.playerId, cell);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    if (outcome.concluded) {
+      this.gameState = outcome.gameState;
+      this.afterSeaStep({ gameState: outcome.gameState, concluded: outcome.concluded });
+    } else {
+      this.afterSeaStep(cascadeAiSeaBattle(outcome.gameState));
+    }
+    this.notifyState();
+  }
+
+  proposeSeaSimulation(): void {
+    if (!this.gameState) return;
+    const outcome = proposeSeaSimulationEngine(this.gameState, this.playerId);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    // Eine beteiligte KI stimmt sofort zu (cascadeAiSeaBattle).
+    this.afterSeaStep(outcome.concluded ? { gameState: outcome.gameState, concluded: outcome.concluded } : cascadeAiSeaBattle(outcome.gameState));
+    this.notifyState();
+  }
+
+  declineSeaSimulation(): void {
+    if (!this.gameState) return;
+    const outcome = declineSeaSimulationEngine(this.gameState, this.playerId);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.gameState = outcome.gameState;
+    this.notifyState();
+  }
+
+  cancelSeaBattle(): void {
+    if (!this.gameState) return;
+    const outcome = cancelSeaBattleEngine(this.gameState, this.playerId);
+    if (!outcome.ok) {
+      this.errorListeners.forEach((cb) => cb(outcome.reason));
+      return;
+    }
+    this.gameState = outcome.gameState;
+    this.notifyState();
+  }
+
+  /** Übernimmt den Zustand nach einem Seeschlacht-Schritt (inkl. KI-Zügen), meldet ein Ende und lässt einen pausierten KI-Zug weiterlaufen. */
+  private afterSeaStep(result: { readonly gameState: GameState; readonly concluded: SeaBattleResult | null }): void {
+    this.gameState = result.gameState;
+    if (result.concluded) this.battleListeners.forEach((cb) => cb(result.concluded!));
+    this.continueStalledAiTurn();
+  }
+
   estimateEnemyForces(targetId: string): void {
     if (!this.gameState) return;
     // Computed from this.gameState (the authoritative, unfiltered state), not visibleState() -
     // see GameClient.ts's estimateEnemyForces doc comment for why.
-    const estimate = estimateForces(this.gameState, targetId);
+    const estimate = estimateForces(this.gameState, targetId, this.playerId);
     this.forceEstimateListeners.forEach((cb) => cb(targetId, estimate));
   }
 

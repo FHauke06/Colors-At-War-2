@@ -1,6 +1,6 @@
-import type { AirTech, GameState, GroundTech, ResearchState, SupportTech } from './types';
+import type { AirTech, GameState, GroundTech, NavalTech, ResearchState, SupportTech } from './types';
 
-const EMPTY_RESEARCH: ResearchState = { unlockedGround: [], unlockedAir: [], unlockedSupport: [] };
+const EMPTY_RESEARCH: ResearchState = { unlockedGround: [], unlockedAir: [], unlockedSupport: [], unlockedNaval: [] };
 
 export function emptyResearchState(): ResearchState {
   return EMPTY_RESEARCH;
@@ -14,6 +14,7 @@ export function fullResearchState(): ResearchState {
     unlockedGround: ['lightTank', 'heavyTank', 'motorizedInfantry'],
     unlockedAir: ['fighters', 'cas', 'bombers'],
     unlockedSupport: ['artillery', 'nuke'],
+    unlockedNaval: ['ships'],
   };
 }
 
@@ -33,6 +34,10 @@ export function isAirUnlocked(gameState: GameState, playerId: string, type: AirT
 
 export function isSupportUnlocked(gameState: GameState, playerId: string, type: SupportTech): boolean {
   return researchAt(gameState, playerId).unlockedSupport.includes(type);
+}
+
+export function isNavalUnlocked(gameState: GameState, playerId: string, type: NavalTech): boolean {
+  return (researchAt(gameState, playerId).unlockedNaval ?? []).includes(type);
 }
 
 export interface TechDef<T> {
@@ -68,6 +73,14 @@ export const SUPPORT_TECH_TREE: Record<SupportTech, TechDef<SupportTech>> = {
   nuke: { cost: 2000, requires: null },
 };
 
+/** Marine: bewusst nur eine Stufe, ohne Voraussetzung - `ships` schaltet Schiffe frei (Rekrutieren in
+ *  Küstengebieten, siehe engine/naval.ts's recruitShips). 200 Rüstungspunkte liegen zwischen CAS (200) und
+ *  Schweren Panzern (250): teuer genug, dass man sich für den Seekrieg entscheiden muss. Die Schiffe selbst
+ *  kosten zusätzlich SHIP_COST pro Stück (engine/naval.ts). */
+export const NAVAL_TECH_TREE: Record<NavalTech, TechDef<NavalTech>> = {
+  ships: { cost: 200, requires: null },
+};
+
 export type ResearchOutcome =
   | { readonly ok: true; readonly gameState: GameState }
   | { readonly ok: false; readonly reason: string };
@@ -77,14 +90,14 @@ function unlockTech<T extends string>(
   playerId: string,
   tech: T,
   tree: Record<T, TechDef<T>>,
-  field: 'unlockedGround' | 'unlockedAir' | 'unlockedSupport',
+  field: 'unlockedGround' | 'unlockedAir' | 'unlockedSupport' | 'unlockedNaval',
 ): ResearchOutcome {
-  if (gameState.pendingBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
 
   const def = tree[tech];
   const research = researchAt(gameState, playerId);
-  const unlocked = research[field] as readonly T[];
+  const unlocked = (research[field] ?? []) as readonly T[];
   if (unlocked.includes(tech)) return { ok: false, reason: 'Bereits erforscht.' };
   if (def.requires && !unlocked.includes(def.requires)) {
     return { ok: false, reason: 'Voraussetzung noch nicht erforscht.' };
@@ -111,4 +124,9 @@ export function unlockAirTech(gameState: GameState, playerId: string, tech: AirT
 
 export function unlockSupportTech(gameState: GameState, playerId: string, tech: SupportTech): ResearchOutcome {
   return unlockTech(gameState, playerId, tech, SUPPORT_TECH_TREE, 'unlockedSupport');
+}
+
+/** Wie unlockGroundTech, für die Marine (engine/research.ts's NAVAL_TECH_TREE). */
+export function unlockNavalTech(gameState: GameState, playerId: string, tech: NavalTech): ResearchOutcome {
+  return unlockTech(gameState, playerId, tech, NAVAL_TECH_TREE, 'unlockedNaval');
 }

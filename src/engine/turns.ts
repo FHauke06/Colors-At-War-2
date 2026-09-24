@@ -1,6 +1,8 @@
-import type { GameState, Territory, TerritoryState, UnitComposition } from './types';
+import type { GameState, SeaZone, Territory, TerritoryState, UnitComposition } from './types';
+import { resetNavalMovement } from './naval';
 import { playAiTurn, type PendingAiDeployment } from './ai';
 import { creditIncome } from './economy';
+import { pruneEliminatedGuests } from './movement';
 import { isEliminated, isGameOver } from './victory';
 import { resolveAirCombatForRound } from './airforce';
 
@@ -12,7 +14,16 @@ const EMPTY_GARRISON: UnitComposition = { infantry: 0, lightTank: 0, heavyTank: 
 
 function resetMovement(territoryState: GameState['territoryState']): GameState['territoryState'] {
   const next = new Map<string, TerritoryState>();
-  for (const [id, state] of territoryState) next.set(id, { ...state, movedIn: EMPTY_GARRISON, extraMoveUsed: EMPTY_GARRISON });
+  for (const [id, state] of territoryState) {
+    const refreshed: TerritoryState = { ...state, movedIn: EMPTY_GARRISON, extraMoveUsed: EMPTY_GARRISON };
+    // Allied guests get their movement back too, same as the garrison they're standing beside.
+    next.set(
+      id,
+      state.guests
+        ? { ...refreshed, guests: state.guests.map((g) => ({ ...g, movedIn: EMPTY_GARRISON, extraMoveUsed: EMPTY_GARRISON })) }
+        : refreshed,
+    );
+  }
   return next;
 }
 
@@ -35,14 +46,16 @@ function advanceToNextPlayer(gameState: GameState, territories: readonly Territo
   } while (isEliminated(gameState, players[nextIndex]!.id) && nextIndex !== currentIndex);
   const nextPlayer = players[nextIndex]!;
 
+  // Whoever's just been eliminated has no turn left to bring their guests home - see pruneEliminatedGuests.
+  const settled = pruneEliminatedGuests(gameState);
   const advanced: GameState = {
-    ...gameState,
+    ...settled,
     turn: wrapped ? gameState.turn + 1 : gameState.turn,
     activePlayerId: nextPlayer.id,
-    territoryState: wrapped ? resetMovement(gameState.territoryState) : gameState.territoryState,
+    territoryState: wrapped ? resetMovement(settled.territoryState) : settled.territoryState,
   };
   if (!wrapped) return advanced;
-  return resolveAirCombatForRound(creditIncome(advanced), territories);
+  return resolveAirCombatForRound(creditIncome(resetNavalMovement(advanced)), territories);
 }
 
 export interface CascadeResult {
@@ -68,18 +81,20 @@ const MAX_CASCADE_PLAYER_TURNS = 1000;
  * advances past the player ending their turn first) and resumeAiTurnIfNeeded (which doesn't - it
  * continues the same AI's turn that a battle had paused).
  */
-function cascadeAiTurns(gameState: GameState, territories: readonly Territory[]): CascadeResult {
+function cascadeAiTurns(gameState: GameState, territories: readonly Territory[], seaZones: readonly SeaZone[]): CascadeResult {
   let state = gameState;
   let pendingAiDeployment: PendingAiDeployment | null = null;
-  for (let turns = 0; turns < MAX_CASCADE_PLAYER_TURNS && !state.pendingBattle && !isGameOver(state); turns++) {
+  for (let turns = 0; turns < MAX_CASCADE_PLAYER_TURNS && !state.pendingBattle && !state.pendingSeaBattle && !isGameOver(state); turns++) {
     const active = state.players.find((p) => p.id === state.activePlayerId);
     if (!active?.isAI) break;
-    const result = playAiTurn(state, active.id, territories);
+    const result = playAiTurn(state, active.id, territories, seaZones);
     state = result.gameState;
     if (result.pendingAiDeployment) {
       pendingAiDeployment = result.pendingAiDeployment;
       break;
     }
+    // Eine Seeschlacht gegen einen Menschen hält den KI-Zug an (resumeAiTurnIfNeeded setzt ihn danach fort).
+    if (state.pendingSeaBattle) break;
     state = advanceToNextPlayer(state, territories);
   }
   return { gameState: state, pendingAiDeployment };
@@ -89,14 +104,14 @@ function cascadeAiTurns(gameState: GameState, territories: readonly Territory[])
  * Ends `playerId`'s turn and hands control to the next seat, then cascades through any AI seats
  * that follow (see cascadeAiTurns).
  */
-export function endTurn(gameState: GameState, playerId: string, territories: readonly Territory[]): EndTurnOutcome {
+export function endTurn(gameState: GameState, playerId: string, territories: readonly Territory[], seaZones: readonly SeaZone[] = []): EndTurnOutcome {
   if (isGameOver(gameState)) return { ok: false, reason: 'Das Spiel ist bereits entschieden.' };
-  if (gameState.pendingBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { ok: false, reason: 'Ein Kampf läuft noch.' };
   if (gameState.activePlayerId !== playerId) return { ok: false, reason: 'Du bist nicht am Zug.' };
   if (!gameState.players.some((p) => p.id === playerId)) return { ok: false, reason: 'Spieler nicht gefunden.' };
 
   const advanced = advanceToNextPlayer(gameState, territories);
-  const { gameState: state, pendingAiDeployment } = cascadeAiTurns(advanced, territories);
+  const { gameState: state, pendingAiDeployment } = cascadeAiTurns(advanced, territories, seaZones);
   return { ok: true, gameState: state, pendingAiDeployment };
 }
 
@@ -112,9 +127,9 @@ export function endTurn(gameState: GameState, playerId: string, territories: rea
  * unchanged) if a battle is still pending, or if the active player isn't AI - the ordinary case
  * where a human's own battle just concluded and it's already correctly their turn to continue.
  */
-export function resumeAiTurnIfNeeded(gameState: GameState, territories: readonly Territory[]): CascadeResult {
-  if (gameState.pendingBattle) return { gameState, pendingAiDeployment: null };
+export function resumeAiTurnIfNeeded(gameState: GameState, territories: readonly Territory[], seaZones: readonly SeaZone[] = []): CascadeResult {
+  if (gameState.pendingBattle || gameState.pendingSeaBattle) return { gameState, pendingAiDeployment: null };
   const active = gameState.players.find((p) => p.id === gameState.activePlayerId);
   if (!active?.isAI) return { gameState, pendingAiDeployment: null };
-  return cascadeAiTurns(gameState, territories);
+  return cascadeAiTurns(gameState, territories, seaZones);
 }

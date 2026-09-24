@@ -1,13 +1,14 @@
 import type { AiDifficulty, GameState, LobbyState, Territory, TerritoryData } from '../engine/types';
 import { MIN_FACTIONS, MAX_FACTIONS } from '../engine/palette';
 import { canStart } from '../engine/session';
+import { finalizeScenarioLobby } from '../engine/setup';
 import { MapRenderer } from '../render/MapRenderer';
 import type { GameClient } from '../net/GameClient';
 import { isHost } from '../net/GameClient';
 import { LocalGameClient } from '../net/LocalGameClient';
 import { RemoteGameClient, resolveWsUrl } from '../net/RemoteGameClient';
 import { MAIN_MAPS, DEFAULT_MAIN_MAP_ID, mainMapById } from '../data/MainMaps';
-import { SCENARIOS } from '../data/Scenarios';
+import { SCENARIOS, scenarioById } from '../data/Scenarios';
 import type { Scenario } from '../data/Scenarios';
 
 const inputClass =
@@ -34,6 +35,9 @@ export class SetupScreen {
   private selectedMapId: string = DEFAULT_MAIN_MAP_ID;
   private data: TerritoryData = mainMapById(this.selectedMapId);
   private territories: readonly Territory[] = this.data.territories;
+
+  /** Nur für einen Online-Host: das gewählte Szenario (data/Scenarios) oder null = freie Karte mit Hauptstadt-Wahl. */
+  private selectedScenarioId: string | null = null;
 
   private client: GameClient | null = null;
   private map: MapRenderer | null = null;
@@ -280,11 +284,14 @@ export class SetupScreen {
       () => maxHumans,
       (n) => { maxHumans = n; },
     );
-    card.appendChild(this.renderMapSelector());
+    this.selectedScenarioId = null;
+    const mapSelector = this.renderMapSelector();
+    card.appendChild(this.renderScenarioSelector(mapSelector));
+    card.appendChild(mapSelector);
     card.appendChild(this.renderDifficultySelector(() => aiDifficulty, (d) => { aiDifficulty = d; }));
     const hint = document.createElement('p');
     hint.className = 'text-sm text-slate-400';
-    hint.textContent = 'Computer-Gegner kannst du danach direkt in der Lobby hinzufügen.';
+    hint.textContent = 'Computer-Gegner kannst du danach direkt in der Lobby hinzufügen (bei einem Szenario stellen die nicht gewählten Fraktionen die KI).';
     card.appendChild(hint);
 
     const createBtn = document.createElement('button');
@@ -293,7 +300,14 @@ export class SetupScreen {
     createBtn.className = primaryBtnClass;
     createBtn.addEventListener('click', () => {
       const name = nameInput.value.trim() || 'Host';
-      this.client = new RemoteGameClient(resolveWsUrl(), { name, maxHumans, mapId: this.selectedMapId, aiDifficulty });
+      const scenario = this.selectedScenarioId ? scenarioById(this.selectedScenarioId) : undefined;
+      this.client = new RemoteGameClient(resolveWsUrl(), {
+        name,
+        maxHumans: scenario ? Math.min(maxHumans, scenario.factions.length) : maxHumans,
+        mapId: this.selectedMapId,
+        aiDifficulty,
+        scenarioId: scenario?.id,
+      });
       this.enterLobby();
     });
 
@@ -421,6 +435,46 @@ export class SetupScreen {
     return wrap;
   }
 
+  /** "Szenario" dropdown, analog zur Kartenauswahl (nur der Online-Host wählt; Joiner laden das Szenario anhand von
+   *  lobby.scenarioId lokal aus data/Scenarios). Ein Szenario bringt seine eigene Karte mit - die Kartenauswahl
+   *  (`mapSelector`) wird dann auf diese gesetzt und gesperrt. */
+  private renderScenarioSelector(mapSelector: HTMLDivElement): HTMLDivElement {
+    const wrap = document.createElement('div');
+    wrap.className = 'flex flex-col gap-1.5';
+    const label = document.createElement('span');
+    label.textContent = 'Szenario:';
+    label.className = 'text-sm text-slate-300';
+    const select = document.createElement('select');
+    select.className = inputClass;
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = 'Kein Szenario (freie Karte, eigene Hauptstadt wählen)';
+    select.appendChild(none);
+    for (const scenario of SCENARIOS) {
+      const mapName = MAIN_MAPS.find((m) => m.id === scenario.mapId)?.name ?? scenario.mapId;
+      const option = document.createElement('option');
+      option.value = scenario.id;
+      option.textContent = `${scenario.name} (${mapName})`;
+      select.appendChild(option);
+    }
+    const desc = document.createElement('p');
+    desc.className = 'hidden text-xs text-slate-400';
+    const mapSelect = mapSelector.querySelector('select');
+    select.addEventListener('change', () => {
+      const scenario = select.value ? scenarioById(select.value) : undefined;
+      this.selectedScenarioId = scenario?.id ?? null;
+      if (scenario) this.setMap(scenario.mapId);
+      if (mapSelect) {
+        mapSelect.value = this.selectedMapId;
+        mapSelect.disabled = !!scenario;
+      }
+      desc.textContent = scenario?.description ?? '';
+      desc.classList.toggle('hidden', !scenario);
+    });
+    wrap.append(label, select, desc);
+    return wrap;
+  }
+
   /** "Einfach"/"Mittel"/"Schwer" toggle row for engine/types.ts's AiDifficulty - "am Spielbeginn
    *  einstellen, wie gut die KI ist". One choice for the whole lobby (see LobbyState.aiDifficulty),
    *  not per AI seat, so this appears once, alongside the offline faction count or the online
@@ -501,6 +555,9 @@ export class SetupScreen {
     hint.className = 'text-sm text-slate-400';
     hint.textContent = 'Klicke auf der Karte ein Gebiet, um es als deine Hauptstadt festzulegen.';
 
+    const factionList = document.createElement('div');
+    factionList.className = 'hidden flex-wrap gap-2';
+
     const mapContainer = document.createElement('div');
     // Built lazily by ensureMapCurrent below, once this session's real map is known - immediately
     // for an offline game or an online host (this.selectedMapId is already right by the time
@@ -516,7 +573,7 @@ export class SetupScreen {
     startBtn.addEventListener('click', () => client.start());
     actionRow.appendChild(startBtn);
 
-    wrap.append(status, errorBanner, slotList, addAiBtn, difficultyLabel, hint, mapContainer, actionRow);
+    wrap.append(status, errorBanner, slotList, addAiBtn, difficultyLabel, hint, factionList, mapContainer, actionRow);
     this.root.appendChild(wrap);
 
     const showError = (message: string): void => {
@@ -544,26 +601,57 @@ export class SetupScreen {
             (host ? '' : ' · Warte auf Host...');
       }
 
+      // Szenario-Lobby: statt der Hauptstadt-Wahl wählt man eine Fraktion; nicht gewählte Fraktionen werden KI-Sitze
+      // (finalizeScenarioLobby) - schon hier als Vorschau in Slots und auf der Karte. Joiner laden das Szenario lokal.
+      const scenario = lobby.scenarioId ? scenarioById(lobby.scenarioId) : undefined;
+      let shown = lobby;
+      if (scenario) {
+        try {
+          shown = finalizeScenarioLobby(lobby);
+        } catch {
+          shown = lobby;
+        }
+      }
+      hint.textContent = scenario
+        ? `Szenario "${scenario.name}": Wähle unten (oder per Klick auf ihre Hauptstadt) deine Fraktion - nicht gewählte Fraktionen spielt die KI.`
+        : 'Klicke auf der Karte ein Gebiet, um es als deine Hauptstadt festzulegen.';
+      factionList.classList.toggle('hidden', !scenario);
+      factionList.classList.toggle('flex', !!scenario);
+      factionList.replaceChildren();
+      for (const faction of scenario?.factions ?? []) {
+        const taker = lobby.slots.find((s) => s.capitalId === faction.capitalId);
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = `flex items-center gap-2 ${taker?.playerId === client.playerId ? primaryBtnClass : secondaryBtnClass}`;
+        const dot = document.createElement('span');
+        dot.className = 'h-3 w-3 shrink-0 rounded-full';
+        dot.style.background = faction.color;
+        btn.append(dot, document.createTextNode(taker ? `${faction.name} — ${taker.name}` : faction.name));
+        btn.disabled = !!taker && taker.playerId !== client.playerId;
+        btn.addEventListener('click', () => client.claimCapital(faction.capitalId));
+        factionList.appendChild(btn);
+      }
+
       slotList.replaceChildren();
-      for (const slot of lobby.slots) {
+      for (const slot of shown.slots) {
         slotList.appendChild(this.renderSlotChip(slot.color, slot.name, slot.capitalId, [
           slot.isHost ? 'Host' : null,
           slot.playerId === client.playerId ? 'Du' : null,
         ].filter((s): s is string => s !== null)));
       }
-      for (const ai of lobby.aiSlots) {
+      for (const ai of shown.aiSlots) {
         const onRemove = client.isOnline && host ? () => client.removeAi(ai.id) : undefined;
         slotList.appendChild(this.renderSlotChip(ai.color, ai.name, ai.capitalId, [], onRemove));
       }
 
-      difficultyLabel.classList.toggle('hidden', lobby.aiSlots.length === 0);
+      difficultyLabel.classList.toggle('hidden', shown.aiSlots.length === 0);
       difficultyLabel.textContent = `KI-Schwierigkeit: ${DIFFICULTY_LABELS[lobby.aiDifficulty]}`;
 
       const canAddMore = lobby.slots.length + lobby.aiSlots.length < MAX_FACTIONS;
-      addAiBtn.classList.toggle('hidden', !(client.isOnline && host));
+      addAiBtn.classList.toggle('hidden', !(client.isOnline && host) || !!scenario);
       addAiBtn.disabled = !canAddMore || connecting;
 
-      this.map?.applyLobby(lobby);
+      this.map?.applyLobby(shown);
 
       startBtn.classList.toggle('hidden', !host);
       startBtn.disabled = !canStart(lobby) || connecting;

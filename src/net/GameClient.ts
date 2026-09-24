@@ -1,5 +1,6 @@
-import type { AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, SupportTech, UnitComposition } from '../engine/types';
+import type { AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, NavalTech, SupportTech, UnitComposition } from '../engine/types';
 import type { BattleResult } from '../engine/combat';
+import type { SeaBattleResult } from '../engine/naval';
 import type { BomberRaidMode } from '../engine/airforce';
 import type { ForceEstimate } from '../engine/intel';
 
@@ -22,7 +23,7 @@ export interface GameClient {
   onError(cb: (message: string) => void): () => void;
   /** Fires when a tactical battle concludes (one side loses every unit on the sub-map) - both
    *  combatants and anyone else watching get this. */
-  onBattle(cb: (battle: BattleResult) => void): () => void;
+  onBattle(cb: (battle: BattleResult | SeaBattleResult) => void): () => void;
   /** Fires in reply to a matching estimateEnemyForces(targetId) call - only this client gets its
    *  own request's answer, never anyone else's. */
   onForceEstimate(cb: (targetId: string, estimate: ForceEstimate) => void): () => void;
@@ -81,9 +82,14 @@ export interface GameClient {
   /** Ends this player's turn within the tactical battle, passing the initiative to the other
    *  combatant (AI seats pass immediately). No-op unless it's this player's turn in the battle. */
   endBattleTurn(): void;
+  /** Bietet in der laufenden taktischen Schlacht ein Unentschieden an bzw. stimmt dem des Gegners zu (jederzeit in der
+   *  Kampfphase, unabhängig vom Zug). Stimmen beide Seiten zu, endet die Schlacht unverändert (siehe engine/combat.ts's
+   *  proposeBattleDraw); eine beteiligte KI antwortet sofort nach ihrer Heuristik (engine/ai.ts's aiWantsDraw). */
+  proposeBattleDraw(): void;
   /** Declares war on `targetId` - a prerequisite for attacking or capturing their territory.
-   *  No-op (with an onError) if already at war, blocked by an active/cooling-down pact, or not
-   *  this player's turn. */
+   *  Everyone in each side's alliance is at war with everyone in the other's from then on (see
+   *  engine/diplomacy.ts's propagateAllianceWars). No-op (with an onError) if already at war,
+   *  allied with the target, blocked by an active/cooling-down pact, or not this player's turn. */
   declareWar(targetId: string): void;
   /** Offers `targetId` a non-aggression pact. Activates immediately (and ends any war) once they
    *  offer one back; otherwise waits as a one-sided pending offer. */
@@ -92,6 +98,16 @@ export interface GameClient {
   withdrawPactProposal(targetId: string): void;
   /** Cancels an active pact with `targetId` - it still blocks a war declaration for 3 more rounds. */
   cancelPact(targetId: string): void;
+  /** Offers `targetId` an alliance (shared vision, automatic war-joining - see engine/diplomacy.ts).
+   *  Forms immediately once they offer one back; otherwise waits as a one-sided pending offer.
+   *  No-op (with an onError) if it isn't possible (see engine/diplomacy.ts's allianceConflict) or
+   *  it isn't this player's turn. */
+  proposeAlliance(targetId: string): void;
+  /** Withdraws an alliance offer this player made that the other side hasn't matched yet. */
+  withdrawAllianceProposal(targetId: string): void;
+  /** Leaves this player's alliance (the others stay allied among themselves). Wars already under
+   *  way continue; war against the former allies stays blocked for 3 more rounds. */
+  leaveAlliance(): void;
   /** Builds a level-1 Flugplatz (AIRFIELD_BUILD_COST) at an owned territory that doesn't already
    *  have one. No-op (with an onError) if unaffordable, one's already there, or not this player's
    *  turn. */
@@ -140,6 +156,26 @@ export interface GameClient {
   /** Same as unlockGroundTech, for engine/research.ts's SUPPORT_TECH_TREE (Artillerie and the
    *  Atombombe). */
   unlockSupportTech(tech: SupportTech): void;
+  /** Wie unlockGroundTech, für die Marine (engine/research.ts's NAVAL_TECH_TREE, Tech `ships`). */
+  unlockNavalTech(tech: NavalTech): void;
+  /** Rekrutiert `count` Schiffe (SHIP_COST je Stück) in einem eigenen Küstengebiet. */
+  recruitShips(territoryId: string, count: number): void;
+  /** Bewegt Schiffe Küste <-> Seezone bzw. Zone <-> Zone. Fährt man in eine feindliche Zone mit Schiffen
+   *  (Krieg nötig), beginnt eine Seeschlacht (pendingSeaBattle in onGameState). */
+  moveShips(fromId: string, toId: string, count: number): void;
+  /** Bestätigt die verdeckte Aufstellung der eigenen Flotte in der laufenden Seeschlacht (Kasten-Indizes
+   *  row * gridSize + col in der eigenen Rasterhälfte, genau so viele wie Schiffe in der Schlacht). */
+  deploySeaFleet(cells: readonly number[]): void;
+  /** Schießt in der Seeschlacht auf einen Kasten der gegnerischen Hälfte. */
+  seaShoot(cell: number): void;
+  /** Ruft eine Seeschlacht ab, solange der Angreifer noch nicht aufgestellt hat. */
+  cancelSeaBattle(): void;
+  /** Bietet an, die Seeschlacht zu simulieren (bzw. stimmt dem Angebot des Gegners zu). Beide Seiten müssen zustimmen,
+   *  KIs stimmen immer sofort zu - dann wird automatisch nach den Seeschlacht-Regeln ausgetragen (engine/naval.ts's
+   *  simulateSeaBattle). */
+  proposeSeaSimulation(): void;
+  /** Lehnt ein Simulations-Angebot des Gegners ab - es wird normal weitergespielt. */
+  declineSeaSimulation(): void;
   /** Ends the current tactical battle instantly, destroying every unit on the sub-map - the
    *  caller's own included - for NUKE_USE_COST Rüstungspunkte (see engine/combat.ts's useNuke).
    *  No-op (with an onError) unless it's this player's turn within the battle, 'nuke' is unlocked,

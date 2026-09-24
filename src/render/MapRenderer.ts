@@ -1,11 +1,12 @@
-import type { AirfieldState, GameState, LobbyState, Territory, TerritoryData, UnitComposition } from '../engine/types';
+import type { AirfieldState, GameState, LobbyState, SeaZoneState, Territory, TerritoryData } from '../engine/types';
 import { NEUTRAL_COLOR } from '../engine/palette';
-import { totalUnits, subtractGarrisons } from '../engine/movement';
+import { garrisonView, totalUnits, type GarrisonView } from '../engine/movement';
 import { resourceValue } from '../engine/economy';
 import { getRelation } from '../engine/diplomacy';
 import { projectableFightersAt } from '../engine/airforce';
 import { UNIT_ICON_PATHS, UNIT_TYPES } from './unitIcons';
 import { AIRCRAFT_ICON_PATHS, AIRCRAFT_TYPES } from './aircraftIcons';
+import { SHIP_ICON_PATH } from './shipIcons';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -48,11 +49,25 @@ const SELECTED_STROKE_WIDTH = '0.3';
 // Diplomacy tab colors (see applyDiplomacyView) - unoccupied territories fall through to
 // NEUTRAL_COLOR the same as every other view, so there's no separate constant for that case.
 const DIPLOMACY_OWN_COLOR = '#16a34a'; // green-600
-const DIPLOMACY_ALLY_COLOR = '#2563eb'; // blue-600
+const DIPLOMACY_ALLY_COLOR = '#2563eb'; // blue-600 - members of the viewer's alliance
+const DIPLOMACY_PACT_COLOR = '#7c3aed'; // violet-600 - an active non-aggression pact, no alliance
 const DIPLOMACY_WAR_COLOR = '#dc2626'; // red-600
 // A rival at plain peace (no pact, no war) isn't any of the 4 requested states - kept one shade
 // lighter than NEUTRAL_COLOR so it doesn't read as unowned, without introducing a 5th loud color.
 const DIPLOMACY_PEACE_COLOR = '#64748b'; // slate-500
+
+// Unit counts on the map (see drawGarrisonLabel): the viewer's own units in green, their allies'
+// ("freundliche" - prefixed with an "F") in blue, everyone else's plain white. Light shades of each,
+// so they stay readable on top of any faction's territory color with the label's black outline.
+const OWN_UNITS_COLOR = '#4ade80'; // green-400
+const FRIENDLY_UNITS_COLOR = '#60a5fa'; // blue-400
+const OTHER_UNITS_COLOR = 'white';
+
+// Seezonen: dezent bläulich (unbesetzt), mit der Besitzerfarbe halbtransparent getönt, sobald jemand sie hält.
+const SEA_FILL = '#2a6fb5';
+const SEA_FILL_OPACITY_FREE = '0.22';
+const SEA_FILL_OPACITY_OWNED = '0.5';
+const SEA_STROKE = '#7dd3fc'; // sky-300
 
 interface CapitalMarker {
   readonly capitalId: string;
@@ -72,6 +87,8 @@ export class MapRenderer {
   private readonly tooltip: HTMLDivElement;
   private readonly pathsById = new Map<string, SVGPathElement>();
   private readonly territoriesById = new Map<string, Territory>();
+  /** Ids der Seezonen (ebenfalls in pathsById/territoriesById, damit Hover, Auswahl und Drag sie wie Landgebiete behandeln). */
+  private readonly seaIds = new Set<string>();
   private hoveredId: string | null = null;
   private clickHandler: ((territoryId: string) => void) | null = null;
   private dragHandler: DragHandler | null = null;
@@ -79,6 +96,8 @@ export class MapRenderer {
   private dragEligible = false;
   private dragLine: SVGLineElement | null = null;
   private currentGameState: GameState | null = null;
+  /** Whose units count as "own" (green) and whose as "friendly" (blue) - see applyGameState. */
+  private viewerId: string | null = null;
 
   constructor(container: HTMLElement, data: TerritoryData) {
     this.svg = document.createElementNS(SVG_NS, 'svg');
@@ -88,6 +107,32 @@ export class MapRenderer {
     this.tooltip = document.createElement('div');
     this.tooltip.className =
       'pointer-events-none fixed hidden -translate-x-1/2 -translate-y-[130%] rounded-md border border-slate-600 bg-slate-800 px-2.5 py-1 text-sm font-semibold text-slate-100 shadow-lg z-10';
+
+    // Seezonen zuerst: sie liegen unter dem Land, sichtbar bleibt nur das Wasser. Standardmäßig nicht anklickbar
+    // (Lobby/Setup); GameScreen schaltet sie per setSeaInteractive frei.
+    for (const zone of data.seaZones) {
+      this.seaIds.add(zone.id);
+      this.territoriesById.set(zone.id, zone);
+      const el = document.createElementNS(SVG_NS, 'path');
+      el.setAttribute('d', zone.path);
+      el.setAttribute('data-id', zone.id);
+      el.style.fill = SEA_FILL;
+      el.style.fillOpacity = SEA_FILL_OPACITY_FREE;
+      el.style.stroke = SEA_STROKE;
+      el.style.strokeOpacity = '0.35';
+      el.style.pointerEvents = 'none';
+      el.setAttribute('fill-rule', 'evenodd');
+      el.classList.add('[stroke-width:0.05]', '[vector-effect:non-scaling-stroke]');
+      el.addEventListener('pointerenter', () => this.onEnter(zone));
+      el.addEventListener('pointermove', (e) => this.onMove(e));
+      el.addEventListener('pointerleave', () => this.onLeave());
+      el.addEventListener('pointerdown', (e) => this.onDragStart(e, zone));
+      el.addEventListener('pointermove', (e) => this.onDragMove(e));
+      el.addEventListener('pointerup', (e) => this.onDragEnd(e));
+      el.addEventListener('pointercancel', () => this.cancelDrag());
+      this.svg.appendChild(el);
+      this.pathsById.set(zone.id, el);
+    }
 
     for (const territory of data.territories) {
       this.territoriesById.set(territory.id, territory);
@@ -133,6 +178,21 @@ export class MapRenderer {
     container.appendChild(this.tooltip);
   }
 
+  /** Macht die Seezonen anklickbar/ziehbar (im laufenden Spiel) oder wieder inaktiv (Lobby). */
+  setSeaInteractive(on: boolean): void {
+    for (const id of this.seaIds) {
+      const el = this.pathsById.get(id);
+      if (el) {
+        el.style.pointerEvents = on ? 'auto' : 'none';
+        el.classList.toggle('cursor-pointer', on);
+      }
+    }
+  }
+
+  isSeaZone(id: string): boolean {
+    return this.seaIds.has(id);
+  }
+
   /** Called with a territory id whenever the player taps/clicks it without dragging (e.g. to
    *  claim a capital, or to open a recruit menu). */
   setClickHandler(handler: ((territoryId: string) => void) | null): void {
@@ -160,9 +220,33 @@ export class MapRenderer {
     this.selectionLayer.appendChild(outline);
   }
 
-  /** Colors territories by owner, marks capitals, and labels garrison sizes. Pass null to reset. */
-  applyGameState(gameState: GameState | null): void {
+  /** Draws an outline around each listed territory, in its own color - e.g. the Diplomatie tab
+   *  ringing a clicked country in amber and its allies in blue at the same time. Shares the
+   *  selection layer with setSelectedTerritory (whichever ran last wins), so pass an empty list
+   *  (or call setSelectedTerritory(null)) to clear it. */
+  setOutlinedTerritories(
+    outlines: readonly { readonly territoryId: string; readonly stroke: string; readonly strokeWidth?: string }[],
+  ): void {
+    this.selectionLayer.replaceChildren();
+    for (const { territoryId, stroke, strokeWidth } of outlines) {
+      const territory = this.territoriesById.get(territoryId);
+      if (!territory) continue;
+      const outline = document.createElementNS(SVG_NS, 'path');
+      outline.setAttribute('d', territory.path);
+      outline.setAttribute('fill', 'none');
+      outline.setAttribute('stroke', stroke);
+      outline.setAttribute('stroke-width', strokeWidth ?? SELECTED_STROKE_WIDTH);
+      outline.setAttribute('vector-effect', 'non-scaling-stroke');
+      this.selectionLayer.appendChild(outline);
+    }
+  }
+
+  /** Colors territories by owner, marks capitals, and labels garrison sizes - `viewerId`'s own units
+   *  green, their allies' (standing on the same territory or theirs) blue, see drawGarrisonLabel.
+   *  Pass a null game state to reset. */
+  applyGameState(gameState: GameState | null, viewerId: string | null = null): void {
     this.currentGameState = gameState;
+    this.viewerId = viewerId;
     this.paint(
       gameState
         ? new Map(
@@ -178,9 +262,104 @@ export class MapRenderer {
     if (!gameState) return;
     this.drawMarkers(gameState.players.map((p) => ({ capitalId: p.capitalId, color: p.color })), false);
     for (const [id, state] of gameState.territoryState) {
-      if (totalUnits(state.garrison) === 0) continue;
-      this.drawGarrisonLabel(id, state.garrison, subtractGarrisons(state.garrison, state.movedIn));
+      this.drawGarrisonLabel(id, garrisonView(gameState, state, viewerId));
+      if ((state.ships ?? 0) > 0) this.drawShipLabel(id, state.ships ?? 0, state.shipsMovedIn ?? 0, state.ownerId === viewerId);
     }
+    this.paintSeaZones(gameState, viewerId);
+  }
+
+  /** Marine-Tab: die Karte wie im Karten-Tab (Land nach Besitzer, Garnisonen), Seezonen deutlich hervorgehoben, dazu Schiffe in Häfen und Zonen. */
+  applyNavalView(gameState: GameState, viewerId: string): void {
+    this.currentGameState = gameState;
+    this.viewerId = viewerId;
+    this.paint(new Map([...gameState.territoryState.entries()].map(([id, st]) => [id, gameState.players.find((p) => p.id === st.ownerId)?.color])));
+    this.markerLayer.replaceChildren();
+    this.drawMarkers(gameState.players.map((p) => ({ capitalId: p.capitalId, color: p.color })), false);
+    for (const [id, state] of gameState.territoryState) {
+      this.drawGarrisonLabel(id, garrisonView(gameState, state, viewerId));
+      if ((state.ships ?? 0) > 0) this.drawShipLabel(id, state.ships ?? 0, state.shipsMovedIn ?? 0, state.ownerId === viewerId);
+    }
+    this.paintSeaZones(gameState, viewerId);
+    for (const [id, el] of this.pathsById) {
+      if (!this.seaIds.has(id)) el.style.fillOpacity = '0.55';
+      else el.style.fillOpacity = (gameState.seaZones.get(id)?.ships ?? 0) > 0 ? '0.8' : '0.4';
+    }
+  }
+
+  /** Färbt Seezonen nach Besitzer und zeichnet Name, Schiffsanzahl (verfügbar/gesamt) und eingeschiffte Truppen. */
+  private paintSeaZones(gameState: GameState, viewerId: string | null): void {
+    for (const id of this.seaIds) {
+      const el = this.pathsById.get(id);
+      const zone = this.territoriesById.get(id);
+      if (!el || !zone) continue;
+      const state = gameState.seaZones.get(id);
+      const owner = state && state.ships > 0 && state.ownerId ? gameState.players.find((p) => p.id === state.ownerId) : undefined;
+      el.style.fill = owner?.color ?? SEA_FILL;
+      el.style.fillOpacity = owner ? SEA_FILL_OPACITY_OWNED : SEA_FILL_OPACITY_FREE;
+      this.drawSeaLabel(zone, state, state?.ownerId === viewerId);
+    }
+  }
+
+  private drawSeaLabel(zone: Territory, state: SeaZoneState | undefined, own: boolean): void {
+    const [rawCx, rawCy] = zone.centroid;
+    const cx = rawCx ?? 0;
+    const cy = rawCy ?? 0;
+    const name = document.createElementNS(SVG_NS, 'text');
+    name.setAttribute('x', String(cx));
+    name.setAttribute('y', String(cy));
+    name.setAttribute('text-anchor', 'middle');
+    name.setAttribute('font-size', '0.4');
+    name.setAttribute('font-style', 'italic');
+    name.setAttribute('fill', '#bae6fd');
+    name.setAttribute('fill-opacity', '0.8');
+    name.setAttribute('stroke', '#0c4a6e');
+    name.setAttribute('stroke-width', '0.04');
+    name.setAttribute('paint-order', 'stroke');
+    name.textContent = zone.name;
+    this.markerLayer.appendChild(name);
+    if (!state) return;
+    const row: { readonly icon: string; readonly text: string }[] = [];
+    if (state.ships > 0) {
+      const avail = state.ships - state.shipsMovedIn;
+      row.push({ icon: SHIP_ICON_PATH, text: avail < state.ships ? `${avail}/${state.ships}` : String(state.ships) });
+    }
+    const troops = totalUnits(state.embarked);
+    if (troops > 0) row.push({ icon: UNIT_ICON_PATHS.infantry, text: String(troops) });
+    row.forEach((entry, i) => this.drawIconCount(cx, cy + 0.55 + i * 0.6, entry.icon, entry.text, own ? OWN_UNITS_COLOR : OTHER_UNITS_COLOR, 0.5));
+  }
+
+  /** Ein weißes Symbol (SVG-Pfad) mit Zahl daneben, mittig um `cx`. */
+  private drawIconCount(cx: number, y: number, iconPaths: string, text: string, fill: string, fontSize: number): void {
+    const iconSize = fontSize * 0.95;
+    const icon = document.createElementNS(SVG_NS, 'g');
+    icon.setAttribute('transform', `translate(${cx - 0.05 - iconSize}, ${y - iconSize * 0.85}) scale(${iconSize / 16})`);
+    icon.setAttribute('fill', 'white');
+    icon.setAttribute('stroke', 'black');
+    icon.setAttribute('stroke-width', '1.4');
+    icon.setAttribute('paint-order', 'stroke');
+    icon.innerHTML = iconPaths;
+    this.markerLayer.appendChild(icon);
+    const label = document.createElementNS(SVG_NS, 'text');
+    label.setAttribute('x', String(cx + 0.05));
+    label.setAttribute('y', String(y));
+    label.setAttribute('text-anchor', 'start');
+    label.setAttribute('font-size', String(fontSize));
+    label.setAttribute('font-weight', '700');
+    label.setAttribute('fill', fill);
+    label.setAttribute('stroke', 'black');
+    label.setAttribute('stroke-width', '0.055');
+    label.setAttribute('paint-order', 'stroke');
+    label.textContent = text;
+    this.markerLayer.appendChild(label);
+  }
+
+  /** Schiffe im Hafen eines Küstengebiets: eine Zeile oberhalb der Garnison. */
+  private drawShipLabel(territoryId: string, ships: number, movedIn: number, own: boolean): void {
+    const territory = this.territoriesById.get(territoryId);
+    if (!territory) return;
+    const [rawCx, rawCy] = territory.centroid;
+    const avail = ships - movedIn;
+    this.drawIconCount(rawCx ?? 0, (rawCy ?? 0) - 0.15, SHIP_ICON_PATH, avail < ships ? `${avail}/${ships}` : String(ships), own ? OWN_UNITS_COLOR : OTHER_UNITS_COLOR, 0.44);
   }
 
   /** Colors territories by their current Rüstungspunkte-Wert (base value plus factories built
@@ -197,12 +376,14 @@ export class MapRenderer {
   }
 
   /** Colors territories by `viewerId`'s diplomatic relation with each owner: their own ground
-   *  green, anyone they hold an active pact with blue, anyone they're at war with red - unoccupied
-   *  territories fall through to the usual NEUTRAL_COLOR grey (see `paint`). A rival at plain peace
-   *  (no pact, no war) gets a muted neutral tone distinct from "unowned" - not one of the 4 states
-   *  asked for, but leaving it identical to unowned ground would hide real ownership information. */
+   *  green, their alliance's members blue, anyone they hold an active pact with (but no alliance)
+   *  violet, anyone they're at war with red - unoccupied territories fall through to the usual
+   *  NEUTRAL_COLOR grey (see `paint`). A rival at plain peace (no pact, no alliance, no war) gets a
+   *  muted neutral tone distinct from "unowned" - leaving it identical to unowned ground would hide
+   *  real ownership information. */
   applyDiplomacyView(gameState: GameState, viewerId: string): void {
     this.currentGameState = gameState;
+    this.viewerId = viewerId;
     const colorByTerritory = new Map<string, string>();
     for (const [id, state] of gameState.territoryState) {
       if (state.ownerId === null) continue; // stays NEUTRAL_COLOR
@@ -212,7 +393,8 @@ export class MapRenderer {
       }
       const relation = getRelation(gameState, viewerId, state.ownerId);
       if (relation.atWar) colorByTerritory.set(id, DIPLOMACY_WAR_COLOR);
-      else if (relation.pact?.active) colorByTerritory.set(id, DIPLOMACY_ALLY_COLOR);
+      else if (relation.allied) colorByTerritory.set(id, DIPLOMACY_ALLY_COLOR);
+      else if (relation.pact?.active) colorByTerritory.set(id, DIPLOMACY_PACT_COLOR);
       else colorByTerritory.set(id, DIPLOMACY_PEACE_COLOR);
     }
     this.paint(colorByTerritory);
@@ -228,6 +410,7 @@ export class MapRenderer {
    *  with its level and currently-stationed aircraft, same as before. */
   applyAirforceView(gameState: GameState, territories: readonly Territory[], viewerId: string): void {
     this.currentGameState = gameState;
+    this.viewerId = viewerId;
     const colorByTerritory = new Map<string, string>();
     for (const t of territories) {
       const myFighters = projectableFightersAt(gameState, t.id, viewerId, territories);
@@ -249,6 +432,7 @@ export class MapRenderer {
   /** Colors territories by lobby claims (pre-game) and marks each claimed capital so far. */
   applyLobby(lobby: LobbyState | null): void {
     this.currentGameState = null;
+    this.viewerId = null;
     const colorByTerritory = new Map<string, string | undefined>();
     const markers: CapitalMarker[] = [];
     if (lobby) {
@@ -272,7 +456,9 @@ export class MapRenderer {
     // (e.g. right after a move) while the pointer sits still, and a stale hover-fill left over
     // from before that change would otherwise hide the new, correct color indefinitely.
     for (const [id, el] of this.pathsById) {
+      if (this.seaIds.has(id)) continue;
       el.style.fill = colorByTerritory.get(id) ?? NEUTRAL_COLOR;
+      el.style.fillOpacity = '';
     }
   }
 
@@ -314,15 +500,18 @@ export class MapRenderer {
 
   /** One line per unit type actually present at this territory - icon + count (or
    *  "available/total" once some of that type have moved this round) - stacked and centered on
-   *  the territory's centroid, same convention as the tactical battle grid's tiles. */
-  private drawGarrisonLabel(territoryId: string, total: UnitComposition, available: UnitComposition): void {
+   *  the territory's centroid, same convention as the tactical battle grid's tiles. The count is
+   *  sorted by whose units they are and joined with "/", all in one row: the viewer's own in green,
+   *  then their allies' in blue behind an "F" ("freundlich"), then anyone else's in white - so 5 of
+   *  my own units standing beside 3 of an ally's read "5/F3", an ally's territory I'm not in "F3". */
+  private drawGarrisonLabel(territoryId: string, view: GarrisonView): void {
     const territory = this.territoriesById.get(territoryId);
     if (!territory) return;
     const [rawCx, rawCy] = territory.centroid;
     const cx = rawCx ?? 0;
     const cy = rawCy ?? 0;
 
-    const types = UNIT_TYPES.filter((type) => total[type] > 0);
+    const types = UNIT_TYPES.filter((type) => view.own[type] + view.friendly[type] + view.other[type] > 0);
     if (types.length === 0) return;
 
     const lineHeight = 0.7;
@@ -332,9 +521,19 @@ export class MapRenderer {
 
     types.forEach((type, i) => {
       const y = startY + i * lineHeight;
-      const count = total[type];
-      const avail = available[type];
-      const text = avail < count ? `${avail}/${count}` : String(count);
+      const parts: { readonly text: string; readonly fill: string }[] = [];
+      const own = view.own[type];
+      if (own > 0) {
+        const avail = view.ownAvailable[type];
+        parts.push({ text: avail < own ? `${avail}/${own}` : String(own), fill: OWN_UNITS_COLOR });
+      }
+      const friendly = view.friendly[type];
+      if (friendly > 0) parts.push({ text: `F${friendly}`, fill: FRIENDLY_UNITS_COLOR });
+      const other = view.other[type];
+      if (other > 0) {
+        const avail = view.otherAvailable[type];
+        parts.push({ text: avail < other ? `${avail}/${other}` : String(other), fill: OTHER_UNITS_COLOR });
+      }
 
       const icon = document.createElementNS(SVG_NS, 'g');
       const scale = iconSize / 16;
@@ -352,13 +551,24 @@ export class MapRenderer {
       label.setAttribute('text-anchor', 'start');
       label.setAttribute('font-size', '0.56');
       label.setAttribute('font-weight', '700');
-      label.setAttribute('fill', 'white');
+      label.setAttribute('fill', OTHER_UNITS_COLOR);
       label.setAttribute('stroke', 'black');
       label.setAttribute('stroke-width', '0.055');
       label.setAttribute('paint-order', 'stroke');
-      label.textContent = text;
+      parts.forEach((part, index) => {
+        if (index > 0) label.appendChild(this.labelSpan('/', OTHER_UNITS_COLOR));
+        label.appendChild(this.labelSpan(part.text, part.fill));
+      });
       this.markerLayer.appendChild(label);
     });
+  }
+
+  /** One differently-colored run of text inside a garrison label's row (see drawGarrisonLabel). */
+  private labelSpan(text: string, fill: string): SVGTSpanElement {
+    const span = document.createElementNS(SVG_NS, 'tspan');
+    span.setAttribute('fill', fill);
+    span.textContent = text;
+    return span;
   }
 
   /** A territory's Flugplatz label: its level on one line above the centroid, then - one row per
@@ -430,12 +640,28 @@ export class MapRenderer {
     this.setNeighborStroke(territory, true);
     const state = this.currentGameState?.territoryState.get(territory.id);
     let garrisonText = '';
-    if (state) {
-      const total = totalUnits(state.garrison);
-      if (total > 0) {
-        const available = total - totalUnits(state.movedIn);
-        garrisonText = ` (${available < total ? `${available}/${total}` : total})`;
+    if (state && this.currentGameState) {
+      // Same split and notation as the map label (see drawGarrisonLabel), summed over all unit types.
+      const view = garrisonView(this.currentGameState, state, this.viewerId);
+      const counts: string[] = [];
+      const own = totalUnits(view.own);
+      if (own > 0) {
+        const available = totalUnits(view.ownAvailable);
+        counts.push(available < own ? `${available}/${own}` : String(own));
       }
+      const friendly = totalUnits(view.friendly);
+      if (friendly > 0) counts.push(`F${friendly}`);
+      const other = totalUnits(view.other);
+      if (other > 0) {
+        const available = totalUnits(view.otherAvailable);
+        counts.push(available < other ? `${available}/${other}` : String(other));
+      }
+      if (counts.length > 0) garrisonText = ` (${counts.join('/')})`;
+    }
+    const seaState = this.seaIds.has(territory.id) ? this.currentGameState?.seaZones.get(territory.id) : undefined;
+    if (seaState) {
+      const owner = this.currentGameState?.players.find((p) => p.id === seaState.ownerId);
+      garrisonText = ` (${owner?.name ?? 'neutral'}${seaState.ships > 0 ? `, ${seaState.ships} Schiffe` : ''})`;
     }
     this.tooltip.textContent = `${territory.name}${garrisonText}`;
     this.tooltip.classList.remove('hidden');

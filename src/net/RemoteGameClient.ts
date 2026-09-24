@@ -1,6 +1,7 @@
-import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, SupportTech, UnitComposition } from '../engine/types';
+import type { AiDifficulty, AirComposition, AirTech, BattlePlacement, GameState, GroundTech, LobbyState, NavalTech, SupportTech, UnitComposition } from '../engine/types';
 import { deserializeGameState } from '../engine/session';
 import type { BattleResult } from '../engine/combat';
+import type { SeaBattleResult } from '../engine/naval';
 import type { BomberRaidMode } from '../engine/airforce';
 import type { ForceEstimate } from '../engine/intel';
 import type { ClientMessage, ServerMessage } from './protocol';
@@ -24,6 +25,8 @@ export interface RemoteSessionOptions {
   /** How well every AI seat added to this lobby plays; only used when creating - defaults to
    *  'medium' if omitted (see LobbyState.aiDifficulty). */
   readonly aiDifficulty?: AiDifficulty;
+  /** Which of data/Scenarios to play; only used when creating - a joining client gets it from the lobby (lobby.scenarioId). */
+  readonly scenarioId?: string;
 }
 
 /** Online mode: proxies the same GameClient interface over a WebSocket to the session server. */
@@ -38,7 +41,7 @@ export class RemoteGameClient implements GameClient {
   private readonly startListeners = new Set<(gameState: GameState) => void>();
   private readonly stateListeners = new Set<(gameState: GameState) => void>();
   private readonly errorListeners = new Set<(message: string) => void>();
-  private readonly battleListeners = new Set<(battle: BattleResult) => void>();
+  private readonly battleListeners = new Set<(battle: BattleResult | SeaBattleResult) => void>();
   private readonly forceEstimateListeners = new Set<(targetId: string, estimate: ForceEstimate) => void>();
 
   constructor(wsUrl: string, options: RemoteSessionOptions) {
@@ -64,6 +67,7 @@ export class RemoteGameClient implements GameClient {
         maxHumans: options.maxHumans,
         mapId: options.mapId,
         aiDifficulty: options.aiDifficulty,
+        scenarioId: options.scenarioId,
       });
     });
     this.ws.addEventListener('message', (event) => {
@@ -129,7 +133,7 @@ export class RemoteGameClient implements GameClient {
     return () => this.errorListeners.delete(cb);
   }
 
-  onBattle(cb: (battle: BattleResult) => void): () => void {
+  onBattle(cb: (battle: BattleResult | SeaBattleResult) => void): () => void {
     this.battleListeners.add(cb);
     return () => this.battleListeners.delete(cb);
   }
@@ -215,6 +219,10 @@ export class RemoteGameClient implements GameClient {
     this.send({ type: 'cas_strike', calledAircraftId, targetSubId });
   }
 
+  proposeBattleDraw(): void {
+    this.send({ type: 'propose_battle_draw' });
+  }
+
   endBattleTurn(): void {
     this.send({ type: 'end_battle_turn' });
   }
@@ -233,6 +241,18 @@ export class RemoteGameClient implements GameClient {
 
   cancelPact(targetId: string): void {
     this.send({ type: 'cancel_pact', targetId });
+  }
+
+  proposeAlliance(targetId: string): void {
+    this.send({ type: 'propose_alliance', targetId });
+  }
+
+  withdrawAllianceProposal(targetId: string): void {
+    this.send({ type: 'withdraw_alliance_proposal', targetId });
+  }
+
+  leaveAlliance(): void {
+    this.send({ type: 'leave_alliance' });
   }
 
   buildAirfield(territoryId: string): void {
@@ -265,6 +285,38 @@ export class RemoteGameClient implements GameClient {
 
   unlockSupportTech(tech: SupportTech): void {
     this.send({ type: 'unlock_support_tech', tech });
+  }
+
+  unlockNavalTech(tech: NavalTech): void {
+    this.send({ type: 'unlock_naval_tech', tech });
+  }
+
+  recruitShips(territoryId: string, count: number): void {
+    this.send({ type: 'recruit_ships', territoryId, count });
+  }
+
+  moveShips(fromId: string, toId: string, count: number): void {
+    this.send({ type: 'move_ships', fromId, toId, count });
+  }
+
+  deploySeaFleet(cells: readonly number[]): void {
+    this.send({ type: 'deploy_sea_fleet', cells });
+  }
+
+  seaShoot(cell: number): void {
+    this.send({ type: 'sea_shoot', cell });
+  }
+
+  proposeSeaSimulation(): void {
+    this.send({ type: 'propose_sea_simulate' });
+  }
+
+  declineSeaSimulation(): void {
+    this.send({ type: 'decline_sea_simulate' });
+  }
+
+  cancelSeaBattle(): void {
+    this.send({ type: 'cancel_sea_battle' });
   }
 
   estimateEnemyForces(targetId: string): void {

@@ -8,9 +8,26 @@ export interface Territory {
   readonly centroid: readonly number[];
 }
 
+/** Eine Seezone (Wassergebiet) der Hauptkarte - gleiche Form wie ein Landgebiet, damit MapRenderer sie
+ *  genauso zeichnen kann. `neighbors` enthält die angrenzenden Seezonen UND die angrenzenden
+ *  Küsten-Landgebiete (Land -> Seezone wird nicht gespeichert, siehe engine/naval.ts's coastalZoneIds).
+ *  Die Ids sind über Land- und Seegebiete hinweg eindeutig. Daten: data/MainMaps/*SeaZones.ts. */
+export interface SeaZone {
+  readonly id: string;
+  readonly name: string;
+  /** SVG path `d` attribute in the map's projected coordinate space. */
+  readonly path: string;
+  readonly neighbors: readonly string[];
+  /** Projected [x, y] für Namen und Schiffsanzahl-Label. */
+  readonly centroid: readonly number[];
+}
+
 export interface TerritoryData {
   readonly viewBox: string;
   readonly territories: readonly Territory[];
+  /** Die Seezonen dieser Karte (Meer, in Wassergebiete eingeteilt) - Seekampf und Überseetransport
+   *  laufen ausschließlich darüber, Landgebiete grenzen nicht mehr direkt über Wasser aneinander. */
+  readonly seaZones: readonly SeaZone[];
 }
 
 /**
@@ -41,6 +58,10 @@ export type AirTech = 'fighters' | 'cas' | 'bombers';
  *  rather than recruited at all. Grouped together in the Research tab's "Support" tab (see
  *  engine/research.ts's SUPPORT_TECH_TREE) since neither fits the ground/air split. */
 export type SupportTech = 'artillery' | 'nuke';
+/** Marine - eigene Forschungskategorie (siehe engine/research.ts's NAVAL_TECH_TREE): erst mit `ships`
+ *  dürfen Schiffe rekrutiert werden, die man braucht, um Seezonen zu besetzen und Landeinheiten über
+ *  Wasser zu schicken (engine/naval.ts). */
+export type NavalTech = 'ships';
 
 /** How aggressively and effectively every AI seat in a game plays - chosen once, for the whole
  *  lobby, before the game starts (see LobbyState.aiDifficulty/engine/session.ts's createLobby) and
@@ -58,6 +79,7 @@ export interface ResearchState {
   readonly unlockedGround: readonly GroundTech[];
   readonly unlockedAir: readonly AirTech[];
   readonly unlockedSupport: readonly SupportTech[];
+  readonly unlockedNaval: readonly NavalTech[];
 }
 
 export interface Player {
@@ -115,6 +137,30 @@ export interface TerritoryState {
    *  regardless of movedIn - see engine/movement.ts's availableToMove/splitExtraMoveUnits, which
    *  decide whether a given move is a unit's first (free of movedIn same as usual, but leaves it
    *  still available) or second (adds it to the destination's extraMoveUsed, finally locking it). */
+  readonly extraMoveUsed: UnitComposition;
+  /** Units of the owner's allies standing on this territory too ("Verbündete dürfen auf demselben
+   *  Gebiet stehen") - see engine/movement.ts's stackOf/depositUnits for the rules. Sparse and
+   *  optional: a territory nobody is visiting has no entry at all, which also keeps every game state
+   *  from before this existed loading unchanged. At most one entry per visiting player, never the
+   *  owner themselves, never an empty stack - engine/movement.ts's withStack drops one that empties. */
+  readonly guests?: readonly GuestStack[];
+  /** Schiffe im Hafen dieses (Küsten-)Gebiets, siehe engine/naval.ts - zählen nicht zur
+   *  UnitComposition, sondern als eigener Zähler. Sparse und optional wie `guests`: fehlender Eintrag = 0
+   *  Schiffe, damit alle Spielstände von vor dem Seekampf unverändert laden. Nur der Besitzer des
+   *  Gebiets kann hier Schiffe haben (keine Gästeflotten an Land). */
+  readonly ships?: number;
+  /** Davon: Schiffe, die diese Runde hier angekommen sind (rekrutiert oder aus einer Seezone
+   *  eingelaufen) und deshalb erst nach dem Rundenwechsel wieder fahren dürfen. Sparse, fehlend = 0. */
+  readonly shipsMovedIn?: number;
+}
+
+/** One allied player's units stationed on a territory somebody else owns: the same three fields a
+ *  TerritoryState keeps for its owner's own garrison (so both are handled by the same movement
+ *  rules, see engine/movement.ts's MovableState), plus whose they are. */
+export interface GuestStack {
+  readonly playerId: string;
+  readonly garrison: UnitComposition;
+  readonly movedIn: UnitComposition;
   readonly extraMoveUsed: UnitComposition;
 }
 
@@ -200,7 +246,13 @@ export interface CalledAircraft {
  */
 export interface PendingBattle {
   readonly territoryId: string;
+  /** Wo der Angriff gestartet wurde: ein Landgebiet des Angreifers (oder eines Verbündeten) - oder,
+   *  bei einem Landungsangriff (`fromSeaZone`), die Seezone, in der die Truppen eingeschifft sind. */
   readonly fromId: string;
+  /** Nur gesetzt (`true`) bei einem Landungsangriff von einer Seezone aus (engine/naval.ts's
+   *  startAmphibiousBattle): dann bezieht sich `fromId` auf eine Seezone, `attackerMax` auf die dort
+   *  eingeschifften Landeinheiten, und ein geschlagener Angreifer kann sich nicht zurückziehen. */
+  readonly fromSeaZone?: true;
   readonly attackerId: string;
   readonly defenderId: string;
   readonly attackerMax: UnitComposition;
@@ -222,12 +274,17 @@ export interface PendingBattle {
    *  >50% gate on calling CAS) is always derived from this list's 'active' Jäger entries - see
    *  engine/combat.ts's battleAirSuperiority - rather than cached separately. */
   readonly calledAircraft: readonly CalledAircraft[];
+  /** Unentschieden-Angebote (engine/combat.ts's proposeBattleDraw): sparse, nur als `true` vorhanden. Sobald beide
+   *  Seiten zugestimmt haben, endet die Schlacht unverändert (kein Gebietswechsel, voller Restbestand bleibt). */
+  readonly attackerDrawOffer?: true;
+  readonly defenderDrawOffer?: true;
 }
 
 /** JSON-safe wire form of PendingBattle (subState Map -> entry array). */
 export interface PendingBattleWire {
   readonly territoryId: string;
   readonly fromId: string;
+  readonly fromSeaZone?: true;
   readonly attackerId: string;
   readonly defenderId: string;
   readonly attackerMax: UnitComposition;
@@ -240,6 +297,81 @@ export interface PendingBattleWire {
   readonly activeSide: 'attacker' | 'defender' | null;
   readonly battleRound: number;
   readonly calledAircraft: readonly CalledAircraft[];
+  readonly attackerDrawOffer?: true;
+  readonly defenderDrawOffer?: true;
+}
+
+/**
+ * Der dynamische Zustand einer Seezone (die statische Geometrie liegt in SeaZone) - siehe
+ * engine/naval.ts. Sparse in GameState.seaZones: eine Zone ohne Eintrag ist neutral und leer.
+ * Der Besitz einer Zone hängt an den Schiffen: nur wer in diesem Moment Schiffe darin hat, besitzt sie. Fahren die letzten
+ * Schiffe weg oder werden versenkt, verfällt der Anspruch und der Eintrag wird gelöscht (Zone neutral, sparse - siehe
+ * engine/naval.ts's setZone). Keine Gästestacks: nur der Besitzer hat Schiffe/Truppen in der Zone.
+ */
+export interface SeaZoneState {
+  readonly ownerId: string | null;
+  /** Schiffe des Besitzers in dieser Zone. */
+  readonly ships: number;
+  /** Davon: Schiffe, die diese Runde eingelaufen oder nach einer gewonnenen Seeschlacht hier
+   *  verblieben sind - sie fahren erst nach dem Rundenwechsel wieder (1-Move-Regel, wie `movedIn`). */
+  readonly shipsMovedIn: number;
+  /** An Bord gegangene Landeinheiten (Kopfzahl pro Typ). Wer eine Zone alleinig besetzt und mindestens
+   *  1 eigenes Schiff dort liegen hat, darf Landeinheiten aus angrenzenden Küstengebieten einschiffen. */
+  readonly embarked: UnitComposition;
+  /** Davon: in dieser Runde eingeschiffte Einheiten - sie laufen erst in der Folgerunde aus. */
+  readonly embarkedMovedIn: UnitComposition;
+}
+
+/** Ein abgegebener Schuss der Seeschlacht: `cell` = row * gridSize + col, `hit` = ein Schiff wurde
+ *  versenkt. Beide Seiten sehen alle Schüsse (Treffer und Fehlschüsse). */
+export interface SeaShot {
+  readonly cell: number;
+  readonly hit: boolean;
+}
+
+/**
+ * Eine Seeschlacht in Gang ("Schiffe versenken") - siehe engine/naval.ts. Blockiert wie
+ * PendingBattle alle anderen Aktionen, ist aber ein eigener Zustand (`GameState.pendingSeaBattle`).
+ * Ablauf: Beide Seiten platzieren VERDECKT ihre Flotte auf einem gridSize x gridSize-Raster (jedes Schiff
+ * genau 1 Kasten, Angreifer in der oberen, Verteidiger in der unteren Rasterhälfte; genau so viele Schiffe,
+ * wie in die Schlacht geschickt werden). Danach schießen die Seiten abwechselnd auf je einen Kasten der
+ * gegnerischen Hälfte - jeder Treffer versenkt genau 1 Schiff, Fehlschüsse werden als Wasser markiert. Wer
+ * alle gegnerischen Schiffe versenkt hat, gewinnt; das Raster terminiert von selbst.
+ *
+ * Geheimhaltung: `attackerFleet`/`defenderFleet` enthalten die Zellen der noch schwimmenden Schiffe und
+ * stehen nur im autoritativen Zustand - engine/visibility.ts leert die Flotte einer Seite für jeden
+ * Betrachter außer ihrem Besitzer (Server sendet nie fremde Flotten). Öffentlich sind nur die
+ * Deployed-Flags, die Schüsse und die verbleibende Schiffsanzahl.
+ */
+export interface PendingSeaBattle {
+  readonly zoneId: string;
+  /** Woher der Angriff kam: Küstengebiet des Angreifers oder eine angrenzende Seezone (`fromIsZone`). */
+  readonly fromId: string;
+  readonly fromIsZone: boolean;
+  readonly attackerId: string;
+  readonly defenderId: string;
+  /** Flottengröße zu Beginn: die bewegten Schiffe (Angreifer) bzw. alle Schiffe der Zone (Verteidiger). */
+  readonly attackerShips: number;
+  readonly defenderShips: number;
+  readonly gridSize: number;
+  readonly attackerDeployed: boolean;
+  readonly defenderDeployed: boolean;
+  /** Zellen der noch schwimmenden Schiffe - leer, solange nicht aufgestellt (oder für Fremde verdeckt). */
+  readonly attackerFleet: readonly number[];
+  readonly defenderFleet: readonly number[];
+  /** Verbleibende Schiffe je Seite (öffentlich, auch wenn die Flotte selbst verdeckt ist). */
+  readonly attackerRemaining: number;
+  readonly defenderRemaining: number;
+  /** Schüsse des Angreifers (auf die Hälfte des Verteidigers) bzw. umgekehrt. */
+  readonly attackerShots: readonly SeaShot[];
+  readonly defenderShots: readonly SeaShot[];
+  /** null während der Aufstellung; danach wechselt die aktive Seite nach jedem Schuss. */
+  readonly activeSide: 'attacker' | 'defender' | null;
+  /** Angebote, die Seeschlacht zu SIMULIEREN (engine/naval.ts's proposeSeaSimulation): sparse, nur als `true` vorhanden.
+   *  Stimmen beide Seiten zu (KIs immer), wird sie automatisch ausgetragen. Ein Mensch kann ablehnen (das Angebot
+   *  des Gegners verfällt, es wird normal weitergespielt). */
+  readonly attackerSimOffer?: true;
+  readonly defenderSimOffer?: true;
 }
 
 /** Factories and infrastructure built at a territory - see engine/economy.ts. Sparse: a
@@ -259,25 +391,39 @@ export type PactState =
   | { readonly active: false; readonly blocksWarUntilRound: number };
 
 /** Relation between one specific pair of players. Missing from `relations` means the default:
- *  at peace, no pact - which already forbids attacking (see engine/diplomacy.ts's areAtWar). */
+ *  at peace, no pact, not allied - which already forbids attacking (see engine/diplomacy.ts's
+ *  areAtWar). `allied` and `viaAlliance` are only ever present (as `true`) when they apply, never
+ *  stored as `false`, so a relation with neither reads exactly like one from before alliances
+ *  existed. */
 export interface DiplomaticRelation {
   readonly atWar: boolean;
   readonly pact: PactState | null;
+  /** The two players belong to the same alliance - see engine/diplomacy.ts: allies can't fight
+   *  each other, see each other's units (engine/visibility.ts) and are dragged into each other's
+   *  wars. Alliance membership is a group, kept as a full clique: every pair of members carries
+   *  this flag, so "who are X's allies" is just "everyone X has this flag with". */
+  readonly allied?: true;
+  /** Set only on a war (`atWar`) that exists because of an alliance's automatic war-joining rather
+   *  than a direct declaration - used for wording (notifications, the diplomacy modal), it has no
+   *  effect on the rules. Cleared whenever the war ends. */
+  readonly viaAlliance?: true;
 }
 
 /** All diplomacy between every pair of players. `relations` is keyed by engine/diplomacy.ts's
- *  `pairKey(a, b)` (order-independent). `pactProposals` holds one-sided, not-yet-mutual pact
- *  offers, keyed by `"<fromId>->" + toId` - once both sides have proposed to each other the pact
- *  activates immediately and both entries are cleared. */
+ *  `pairKey(a, b)` (order-independent). `pactProposals` and `allianceProposals` hold one-sided,
+ *  not-yet-mutual offers, keyed by `"<fromId>->" + toId` - once both sides have proposed the same
+ *  thing to each other it activates immediately and both entries are cleared. */
 export interface DiplomacyState {
   readonly relations: ReadonlyMap<string, DiplomaticRelation>;
   readonly pactProposals: ReadonlySet<string>;
+  readonly allianceProposals: ReadonlySet<string>;
 }
 
 /** JSON-safe wire form of DiplomacyState (Map/Set -> arrays). */
 export interface DiplomacyStateWire {
   readonly relations: readonly (readonly [string, DiplomaticRelation])[];
   readonly pactProposals: readonly string[];
+  readonly allianceProposals: readonly string[];
 }
 
 /** A player's running totals across the whole game so far - unlike territoryState/development
@@ -313,9 +459,20 @@ export interface GameState {
   /** Which unit/aircraft types each player has unlocked via the Research tab - see
    *  engine/research.ts. Sparse: a player with no entry has unlocked nothing but Infanterie. */
   readonly research: ReadonlyMap<string, ResearchState>;
+  /** A hard cap on how many nukes a player may ever fire (see engine/combat.ts's useNuke), on top
+   *  of the usual research+Rüstungspunkte cost - decrements by 1 per use, blocks at 0 regardless of
+   *  resources. Sparse and optional by design: a player with no entry here has no cap at all (the
+   *  normal game's behavior, unchanged) - only scenarios that explicitly hand out a stockpile (see
+   *  data/Scenarios/types.ts's ScenarioFaction.nukeStockpile) are limited this way. */
+  readonly nukeStockpiles: ReadonlyMap<string, number>;
   /** Set while a battle (deployment or the tactical fight itself) is in progress; blocks all
    *  other actions (see engine/combat.ts) until it concludes. */
   readonly pendingBattle: PendingBattle | null;
+  /** Der dynamische Zustand aller Seezonen (Besitzer, Schiffe, eingeschiffte Landeinheiten) - sparse:
+   *  eine Zone ohne Eintrag ist neutral und leer. Siehe SeaZoneState und engine/naval.ts. */
+  readonly seaZones: ReadonlyMap<string, SeaZoneState>;
+  /** Gesetzt, solange eine Seeschlacht läuft; blockiert wie pendingBattle alle anderen Aktionen. */
+  readonly pendingSeaBattle: PendingSeaBattle | null;
 }
 
 /** A human seat in the pre-game lobby. */
@@ -351,6 +508,11 @@ export interface LobbyState {
    *  than a per-seat choice. Copied onto each AI's Player at game start (see
    *  Player.aiDifficulty/engine/setup.ts's buildGameStateFromLobby). */
   readonly aiDifficulty: AiDifficulty;
+  /** Optional (sparse - fehlt in alten Lobbys/Spielständen): Id eines Szenarios aus data/Scenarios. Dann wählen die
+   *  Menschen keine freie Hauptstadt, sondern eine Szenario-Fraktion (claimCapital mit deren capitalId), alle nicht
+   *  gewählten Fraktionen werden KI-Sitze und buildGameStateFromLobby baut den Startzustand des Szenarios. `mapId`
+   *  ist dann die Karte des Szenarios. */
+  readonly scenarioId?: string;
 }
 
 /** JSON-safe wire form of GameState (Map -> entry array). */
@@ -365,5 +527,9 @@ export interface GameStateWire {
   readonly stats: readonly (readonly [string, PlayerStats])[];
   readonly airfields: readonly (readonly [string, AirfieldState])[];
   readonly research: readonly (readonly [string, ResearchState])[];
+  readonly nukeStockpiles: readonly (readonly [string, number])[];
   readonly pendingBattle: PendingBattleWire | null;
+  readonly seaZones: readonly (readonly [string, SeaZoneState])[];
+  /** Schon JSON-sicher (keine Maps/Sets) - wird 1:1 übertragen. */
+  readonly pendingSeaBattle: PendingSeaBattle | null;
 }
