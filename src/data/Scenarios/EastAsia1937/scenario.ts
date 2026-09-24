@@ -23,11 +23,11 @@ export const eastAsia1937: Scenario = {
       resources: 30,
       researchState: { unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'] },
       territories: [
-        { territoryId: 'japan', garrison: { infantry: 20, lightTank: 6, heavyTank: 2, artillery: 4, motorizedInfantry: 0 } },
+        { territoryId: 'japan', ships: 10, garrison: { infantry: 20, lightTank: 6, heavyTank: 2, artillery: 4, motorizedInfantry: 0 } },
         { territoryId: 'mandschurei', garrison: { infantry: 15, lightTank: 4, heavyTank: 1, artillery: 3, motorizedInfantry: 0 } },
         { territoryId: 'nordkorea', garrison: { infantry: 6, lightTank: 1, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'suedkorea', garrison: { infantry: 6, lightTank: 1, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
-        { territoryId: 'taiwan', garrison: { infantry: 5, lightTank: 0, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
+        { territoryId: 'taiwan', ships: 2, garrison: { infantry: 5, lightTank: 0, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
       ],
     },
     {
@@ -37,12 +37,12 @@ export const eastAsia1937: Scenario = {
       resources: 25,
       researchState: { unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'] },
       territories: [
-        { territoryId: 'jiangnan', garrison: { infantry: 20, lightTank: 2, heavyTank: 0, artillery: 3, motorizedInfantry: 0 } },
+        { territoryId: 'jiangnan', ships: 3, garrison: { infantry: 20, lightTank: 2, heavyTank: 0, artillery: 3, motorizedInfantry: 0 } },
         { territoryId: 'nordchina', garrison: { infantry: 12, lightTank: 1, heavyTank: 0, artillery: 2, motorizedInfantry: 0 } },
         { territoryId: 'nordwestchina', garrison: { infantry: 10, lightTank: 0, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'suedwestchina', garrison: { infantry: 14, lightTank: 1, heavyTank: 0, artillery: 2, motorizedInfantry: 0 } },
         { territoryId: 'zentralchina', garrison: { infantry: 14, lightTank: 1, heavyTank: 0, artillery: 2, motorizedInfantry: 0 } },
-        { territoryId: 'suedchina', garrison: { infantry: 12, lightTank: 1, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
+        { territoryId: 'suedchina', ships: 2, garrison: { infantry: 12, lightTank: 1, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'innere-mongolei', garrison: { infantry: 4, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 } },
         { territoryId: 'tibet', garrison: { infantry: 3, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 } },
       ],

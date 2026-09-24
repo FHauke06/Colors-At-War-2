@@ -65,3 +65,17 @@
   --color-amber-900: #171717;
   --color-amber-950: #0a0a0a;
 }
+
+/* Karten-Tabs (GameScreen.syncLayout): Ab dem lg-Breakpoint füllt die Spielansicht genau die Fensterhöhe (`map-lock` auf
+ * <html>) und die Karte wird im restlichen Platz in voller Größe zentriert - sie ist so nie angeschnitten, ohne zu scrollen.
+ * Die Container-Query-Einheiten cqw/cqh messen dafür den Kartenbereich (`.map-fit-area`), `--map-ratio` ist das
+ * Seitenverhältnis der viewBox (Breite / Höhe). Ohne `map-lock` (Research-Tab, Kampfansicht, kleine Fenster) bleibt alles
+ * normaler Seitenfluss. Ungeschichtete Regeln - sie schlagen die Tailwind-Utilities, daher `:not(.hidden)`. */
+@media (min-width: 64rem) {
+  .map-lock #app { display: flex; flex-direction: column; height: 100dvh; min-height: 0; padding-bottom: 0.5rem; }
+  .map-lock .lock-fill:not(.hidden) { display: flex; flex: 1 1 0%; flex-direction: column; min-height: 0; }
+  .map-lock .lock-row { flex: 1 1 0%; min-height: 0; }
+  .map-lock .map-shell { max-width: none; }
+  .map-lock .map-fit-area { display: flex; align-items: center; justify-content: center; container-type: size; }
+  .map-lock .map-fit { width: min(100cqw, calc(100cqh * var(--map-ratio))); }
+}

@@ -5,6 +5,10 @@ import type { UnitComposition } from '../../engine/types';
 export interface ScenarioTerritory {
   readonly territoryId: string;
   readonly garrison: UnitComposition;
+  /** Schiffe, die im Hafen dieses Gebiets starten - nur sinnvoll für Küstengebiete (siehe
+   *  engine/economy.ts's isCoastal), und wie die Garnison nur für Großmächte gesetzt. Sie stehen ab
+   *  Runde 1 zur Verfügung (kein `shipsMovedIn`). Weglassen = keine Schiffe. */
+  readonly ships?: number;
 }
 
 /** One playable side in a scenario - human or AI is decided later (see SetupScreen's faction

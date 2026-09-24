@@ -33,8 +33,8 @@ export const coldWar1961: Scenario = {
       nukeStockpile: 5,
       researchState: { unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'], unlockedSupport: ['nuke'] },
       territories: [
-        { territoryId: 'england', garrison: { infantry: 26, lightTank: 5, heavyTank: 2, artillery: 3, motorizedInfantry: 0 } },
-        { territoryId: 'schottland', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
+        { territoryId: 'england', ships: 7, garrison: { infantry: 26, lightTank: 5, heavyTank: 2, artillery: 3, motorizedInfantry: 0 } },
+        { territoryId: 'schottland', ships: 5, garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'wales', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'nordirland', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'malta', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
@@ -48,9 +48,9 @@ export const coldWar1961: Scenario = {
       nukeStockpile: 5,
       researchState: { unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'], unlockedSupport: ['nuke'] },
       territories: [
-        { territoryId: 'nord-frankreich', garrison: { infantry: 22, lightTank: 5, heavyTank: 2, artillery: 3, motorizedInfantry: 0 } },
+        { territoryId: 'nord-frankreich', ships: 4, garrison: { infantry: 22, lightTank: 5, heavyTank: 2, artillery: 3, motorizedInfantry: 0 } },
         { territoryId: 'ost-frankreich', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
-        { territoryId: 'sued-frankreich', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
+        { territoryId: 'sued-frankreich', ships: 4, garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
       ],
     },
     {
@@ -60,7 +60,7 @@ export const coldWar1961: Scenario = {
       resources: 31,
       researchState: { unlockedGround: ['lightTank', 'heavyTank', 'motorizedInfantry'], unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'], unlockedSupport: ['artillery'] },
       territories: [
-        { territoryId: 'west-deutschland', garrison: { infantry: 20, lightTank: 5, heavyTank: 2, artillery: 3, motorizedInfantry: 0 } },
+        { territoryId: 'west-deutschland', ships: 3, garrison: { infantry: 20, lightTank: 5, heavyTank: 2, artillery: 3, motorizedInfantry: 0 } },
         { territoryId: 'sued-deutschland', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
       ],
     },
@@ -71,9 +71,9 @@ export const coldWar1961: Scenario = {
       resources: 34,
       researchState: { unlockedGround: ['lightTank', 'heavyTank', 'motorizedInfantry'], unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'], unlockedSupport: ['artillery'] },
       territories: [
-        { territoryId: 'mittel-italien', garrison: { infantry: 22, lightTank: 5, heavyTank: 2, artillery: 3, motorizedInfantry: 0 } },
+        { territoryId: 'mittel-italien', ships: 3, garrison: { infantry: 22, lightTank: 5, heavyTank: 2, artillery: 3, motorizedInfantry: 0 } },
         { territoryId: 'nord-italien', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
-        { territoryId: 'sued-italien', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
+        { territoryId: 'sued-italien', ships: 4, garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
       ],
     },
     {
@@ -167,14 +167,14 @@ export const coldWar1961: Scenario = {
       researchState: { unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'], unlockedSupport: ['nuke'] },
       territories: [
         { territoryId: 'zentral-russland', garrison: { infantry: 34, lightTank: 5, heavyTank: 2, artillery: 3, motorizedInfantry: 0 } },
-        { territoryId: 'nordwest-russland', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
-        { territoryId: 'sued-russland', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
+        { territoryId: 'nordwest-russland', ships: 8, garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
+        { territoryId: 'sued-russland', ships: 5, garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'belarus', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'ukraine', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'estland', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'lettland', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'litauen', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
-        { territoryId: 'kaliningrad', garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
+        { territoryId: 'kaliningrad', ships: 3, garrison: { infantry: 9, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
       ],
     },
     {

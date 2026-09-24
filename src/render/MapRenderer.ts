@@ -1,4 +1,4 @@
-import type { AirfieldState, GameState, LobbyState, SeaZoneState, Territory, TerritoryData } from '../engine/types';
+import type { AirfieldState, GameState, LobbyState, SeaZoneState, Territory, TerritoryData, UnitComposition } from '../engine/types';
 import { NEUTRAL_COLOR } from '../engine/palette';
 import { garrisonView, totalUnits, type GarrisonView } from '../engine/movement';
 import { resourceValue } from '../engine/economy';
@@ -62,6 +62,8 @@ const DIPLOMACY_PEACE_COLOR = '#64748b'; // slate-500
 const OWN_UNITS_COLOR = '#4ade80'; // green-400
 const FRIENDLY_UNITS_COLOR = '#60a5fa'; // blue-400
 const OTHER_UNITS_COLOR = 'white';
+/** Zeilenabstand der Garnisons-Zeilen (eine je Einheitentyp) - auch für das Schiffslabel darüber (drawShipLabel). */
+const GARRISON_LINE_HEIGHT = 0.7;
 
 // Seezonen: dezent bläulich (unbesetzt), mit der Besitzerfarbe halbtransparent getönt, sobald jemand sie hält.
 const SEA_FILL = '#2a6fb5';
@@ -262,13 +264,14 @@ export class MapRenderer {
     if (!gameState) return;
     this.drawMarkers(gameState.players.map((p) => ({ capitalId: p.capitalId, color: p.color })), false);
     for (const [id, state] of gameState.territoryState) {
-      this.drawGarrisonLabel(id, garrisonView(gameState, state, viewerId));
-      if ((state.ships ?? 0) > 0) this.drawShipLabel(id, state.ships ?? 0, state.shipsMovedIn ?? 0, state.ownerId === viewerId);
+      const view = garrisonView(gameState, state, viewerId);
+      this.drawGarrisonLabel(id, view);
+      if ((state.ships ?? 0) > 0) this.drawShipLabel(id, state.ships ?? 0, state.shipsMovedIn ?? 0, state.ownerId === viewerId, this.garrisonTypes(view).length);
     }
     this.paintSeaZones(gameState, viewerId);
   }
 
-  /** Marine-Tab: die Karte wie im Karten-Tab (Land nach Besitzer, Garnisonen), Seezonen deutlich hervorgehoben, dazu Schiffe in Häfen und Zonen. */
+  /** Marine-Tab: die Karte wie im Karten-Tab (Land nach Besitzer), aber ohne Landeinheiten-Garnisonen - Seezonen deutlich hervorgehoben, dazu Schiffe in Häfen und Zonen. */
   applyNavalView(gameState: GameState, viewerId: string): void {
     this.currentGameState = gameState;
     this.viewerId = viewerId;
@@ -276,7 +279,6 @@ export class MapRenderer {
     this.markerLayer.replaceChildren();
     this.drawMarkers(gameState.players.map((p) => ({ capitalId: p.capitalId, color: p.color })), false);
     for (const [id, state] of gameState.territoryState) {
-      this.drawGarrisonLabel(id, garrisonView(gameState, state, viewerId));
       if ((state.ships ?? 0) > 0) this.drawShipLabel(id, state.ships ?? 0, state.shipsMovedIn ?? 0, state.ownerId === viewerId);
     }
     this.paintSeaZones(gameState, viewerId);
@@ -353,13 +355,16 @@ export class MapRenderer {
     this.markerLayer.appendChild(label);
   }
 
-  /** Schiffe im Hafen eines Küstengebiets: eine Zeile oberhalb der Garnison. */
-  private drawShipLabel(territoryId: string, ships: number, movedIn: number, own: boolean): void {
+  /** Schiffe im Hafen eines Küstengebiets: eine Zeile oberhalb der Garnison (`garrisonRows` = deren Zeilenzahl,
+   *  siehe drawGarrisonLabel - 0 im Marine-Tab, wo keine Garnison gezeichnet wird). */
+  private drawShipLabel(territoryId: string, ships: number, movedIn: number, own: boolean, garrisonRows = 0): void {
     const territory = this.territoriesById.get(territoryId);
     if (!territory) return;
     const [rawCx, rawCy] = territory.centroid;
+    const cy = rawCy ?? 0;
     const avail = ships - movedIn;
-    this.drawIconCount(rawCx ?? 0, (rawCy ?? 0) - 0.15, SHIP_ICON_PATH, avail < ships ? `${avail}/${ships}` : String(ships), own ? OWN_UNITS_COLOR : OTHER_UNITS_COLOR, 0.44);
+    const y = garrisonRows > 0 ? cy + 0.5 - ((garrisonRows - 1) * GARRISON_LINE_HEIGHT) / 2 - GARRISON_LINE_HEIGHT : cy - 0.15;
+    this.drawIconCount(rawCx ?? 0, y, SHIP_ICON_PATH, avail < ships ? `${avail}/${ships}` : String(ships), own ? OWN_UNITS_COLOR : OTHER_UNITS_COLOR, 0.44);
   }
 
   /** Colors territories by their current Rüstungspunkte-Wert (base value plus factories built
@@ -504,6 +509,11 @@ export class MapRenderer {
    *  sorted by whose units they are and joined with "/", all in one row: the viewer's own in green,
    *  then their allies' in blue behind an "F" ("freundlich"), then anyone else's in white - so 5 of
    *  my own units standing beside 3 of an ally's read "5/F3", an ally's territory I'm not in "F3". */
+  /** Die Einheitentypen, für die drawGarrisonLabel eine Zeile zeichnet (mindestens 1 Einheit, egal wessen). */
+  private garrisonTypes(view: GarrisonView): (keyof UnitComposition)[] {
+    return UNIT_TYPES.filter((type) => view.own[type] + view.friendly[type] + view.other[type] > 0);
+  }
+
   private drawGarrisonLabel(territoryId: string, view: GarrisonView): void {
     const territory = this.territoriesById.get(territoryId);
     if (!territory) return;
@@ -511,10 +521,10 @@ export class MapRenderer {
     const cx = rawCx ?? 0;
     const cy = rawCy ?? 0;
 
-    const types = UNIT_TYPES.filter((type) => view.own[type] + view.friendly[type] + view.other[type] > 0);
+    const types = this.garrisonTypes(view);
     if (types.length === 0) return;
 
-    const lineHeight = 0.7;
+    const lineHeight = GARRISON_LINE_HEIGHT;
     const iconSize = 0.46;
     const gap = 0.1;
     const startY = cy + 0.5 - ((types.length - 1) * lineHeight) / 2;

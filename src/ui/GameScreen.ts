@@ -60,13 +60,6 @@ const SVG_NS = 'http://www.w3.org/2000/svg';
 
 type Tab = 'map' | 'resources' | 'diplomacy' | 'airforce' | 'naval' | 'research';
 
-const MAP_HINT =
-  'Ziehe Einheiten auf ein angrenzendes Gebiet, um sie zu verschieben oder ein verteidigtes fremdes Gebiet anzugreifen (erfordert Krieg - klicke die Namenskachel eines Spielers oben für Diplomatie). Auf Gebieten von Verbündeten dürfen deine Einheiten mit stehen und sie durchqueren. Klicke ein eigenes Gebiet an, um dort Einheiten zu rekrutieren. Zahlen: eigene Einheiten grün, verbündete blau mit "F" davor (z. B. 5/F3).';
-const RESOURCE_HINT =
-  'Zeigt, wie viele Rüstungspunkte jedes Gebiet pro Runde einbringt (heller/wärmer = mehr). Klicke ein eigenes Gebiet an, um dort Fabriken zu bauen oder die Infrastruktur auszubauen.';
-const DIPLOMACY_HINT =
-  'Zeigt deinen diplomatischen Status: eigene Gebiete grün, Verbündete (Allianz) blau, Gebiete mit aktivem Nichtangriffspakt violett, Gebiete im Krieg rot, unbesetzte Gebiete grau. Andere Gebiete (Frieden ohne Pakt) sind gedämpft grau-blau. Klicke ein Land an, um seine Verbündeten zu sehen - Verbündete sehen alle Einheiten der anderen, ziehen automatisch in jeden Krieg eines Mitglieds und dürfen mit ihren Einheiten gemeinsam auf denselben Gebieten stehen.';
-
 /** Outline colors the Diplomatie tab draws around the clicked country's territories and around its
  *  allies' territories (see GameScreen.renderDiplomacyFocus) - both picked to stay visible on top of
  *  every fill that view uses (green/blue/violet/red/grey). */
@@ -76,10 +69,6 @@ const DIPLOMACY_ALLY_STROKE = '#67e8f9'; // cyan-300
  *  group of territories at once and has to stay readable at a glance, not just mark one. */
 const DIPLOMACY_FOCUS_STROKE_WIDTH = '2';
 const DIPLOMACY_ALLY_STROKE_WIDTH = '1.5';
-const AIRFORCE_HINT =
-  'Färbt jedes Gebiet nach dem Verhältnis der dort projizierten Jäger statt nach Besitzer: grün = vollständig deine Luftüberlegenheit, rot = vollständig feindliche, grau = keine Jäger von niemandem in Reichweite. Flugplätze zeigen zusätzlich ihre Stufe und stationierten Flugzeuge als Icons. Klicke ein eigenes Gebiet an, um dort einen Flugplatz zu bauen/auszubauen, Flugzeuge zu rekrutieren oder einen Bomber-/Jägereinsatz zu starten - oder ziehe ein Flugplatz-Gebiet direkt auf ein feindliches Ziel.';
-const NAVAL_HINT =
-  'Marine: wie im Karten-Tab, nur mit Schiffen. Klicke ein eigenes Küstengebiet an (Schiffe bauen, Auswahl), ziehe es auf eine angrenzende Seezone, um Schiffe fahren zu lassen und Landeinheiten einzuschiffen (nur in einer alleinig besetzten Zone mit eigenem Schiff). Zone auf Zone verlegt Schiffe (feindliche Zone im Krieg = Seeschlacht), Zone auf Küstengebiet setzt Truppen in der Folgerunde an Land - auf ein verteidigtes Feindgebiet als Landungsangriff. Schiffe brauchen Research > Marine.';
 const RESEARCH_HINT =
   'Schalte neue Einheiten- und Flugzeugtypen für Rüstungspunkte frei - Infanterie ist von Anfang an verfügbar. Manche Technologien setzen eine andere voraus. Fahre mit der Maus über eine Technologie, um ihre Werte zu sehen.';
 
@@ -227,7 +216,7 @@ interface BattleGridOptions {
 
 export class GameScreen {
   private readonly map: MapRenderer;
-  private readonly legend: HTMLDivElement;
+  private readonly container: HTMLElement;
   private readonly statsPanel: HTMLDivElement;
   private readonly errorBanner: HTMLDivElement;
   private readonly battleWaitingBanner: HTMLDivElement;
@@ -292,7 +281,9 @@ export class GameScreen {
     this.currentGameState = initialGameState;
 
     const shell = document.createElement('div');
-    shell.className = 'mx-auto max-w-6xl';
+    shell.className = 'lock-fill map-shell mx-auto w-full max-w-6xl';
+    this.container = container;
+    container.classList.add('lock-fill');
 
     this.errorBanner = document.createElement('div');
     this.errorBanner.className = 'mb-3 hidden rounded-md border border-red-700 bg-red-950 px-3 py-2 text-sm text-red-200';
@@ -314,7 +305,9 @@ export class GameScreen {
     this.turnRow.append(this.turnStatus, this.endTurnBtn);
 
     const tabRow = document.createElement('div');
-    tabRow.className = 'mb-3 flex gap-2';
+    // Bleibt beim Scrollen am oberen Bildschirmrand kleben; `-mt-2 pt-2` hält den Abstand im Ruhezustand unverändert,
+    // der deckende Hintergrund (folgt dem Theme wie der Body) verdeckt darunter durchscrollenden Inhalt.
+    tabRow.className = 'sticky top-0 z-20 -mt-2 flex gap-2 bg-slate-900 pb-3 pt-2';
     this.mapTabBtn = document.createElement('button');
     this.mapTabBtn.type = 'button';
     this.mapTabBtn.textContent = 'Karte';
@@ -346,25 +339,33 @@ export class GameScreen {
       'pointer-events-none fixed right-4 top-32 z-40 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2';
 
     this.hint = document.createElement('p');
-    this.hint.className = 'mb-3 text-sm text-slate-400';
+    this.hint.className = 'mb-3 hidden text-sm text-slate-400';
+    this.hint.textContent = RESEARCH_HINT;
 
+    // Karte: ab lg füllt sie den Platz neben dem Auswahlpanel in voller Höhe und zentriert (siehe style.css, `map-lock`).
     const mapContainer = document.createElement('div');
-    mapContainer.className = 'flex-1';
+    mapContainer.className = 'map-fit-area min-w-0 flex-1';
+    const mapFit = document.createElement('div');
+    mapFit.className = 'map-fit';
+    const [, , viewBoxWidth, viewBoxHeight] = data.viewBox.split(/\s+/).map(Number);
+    mapFit.style.setProperty('--map-ratio', String(viewBoxWidth! / viewBoxHeight!));
+    mapContainer.appendChild(mapFit);
     this.moveSelectionSlot = document.createElement('div');
-    this.moveSelectionSlot.className = 'flex flex-col gap-2';
-    this.legend = document.createElement('div');
-    this.legend.className = 'mt-4 flex flex-wrap gap-2';
+    this.moveSelectionSlot.className = 'flex flex-col gap-2 empty:hidden';
+    // Statistik: ab lg hochkant als feste Leiste am linken Bildschirmrand (unter der Kopfzeile), sonst unter der Karte.
     this.statsPanel = document.createElement('div');
-    this.statsPanel.className = 'mt-4 flex flex-col gap-2 rounded-md border border-slate-700 bg-slate-800/60 p-3';
+    this.statsPanel.className =
+      'mt-4 flex flex-col gap-2 rounded-md border border-slate-700 bg-slate-800/60 p-3 lg:fixed lg:bottom-0 lg:left-0 lg:top-[4.7rem] lg:z-10 lg:mt-0 lg:w-44 lg:rounded-l-none lg:border-l-0 lg:bg-slate-800';
 
     this.mapRow = document.createElement('div');
-    this.mapRow.className = 'flex flex-col gap-4 lg:flex-row';
+    this.mapRow.className = 'lock-row flex flex-col gap-4 lg:flex-row';
     this.mapRow.append(mapContainer, this.moveSelectionSlot);
 
     this.researchPanel = this.buildResearchPanel();
 
     this.normalView = document.createElement('div');
-    this.normalView.append(tabRow, this.hint, this.mapRow, this.researchPanel.el, this.legend, this.statsPanel);
+    this.normalView.className = 'lock-fill';
+    this.normalView.append(tabRow, this.hint, this.mapRow, this.researchPanel.el, this.statsPanel);
 
     this.tacticalView = document.createElement('div');
     this.tacticalView.className = 'hidden';
@@ -383,7 +384,7 @@ export class GameScreen {
     );
     container.appendChild(shell);
 
-    this.map = new MapRenderer(mapContainer, data);
+    this.map = new MapRenderer(mapFit, data);
     this.map.setDragHandler({
       canDrag: (territoryId) => {
         if (isGameOver(this.currentGameState)) return false;
@@ -783,23 +784,14 @@ export class GameScreen {
     this.researchTabBtn.className = tab === 'research' ? primaryBtnClass : secondaryBtnClass;
     this.navalTabBtn.className = tab === 'naval' ? primaryBtnClass : secondaryBtnClass;
     this.map.setSeaInteractive(tab === 'naval');
-    this.hint.textContent =
-      tab === 'map'
-        ? MAP_HINT
-        : tab === 'resources'
-          ? RESOURCE_HINT
-          : tab === 'diplomacy'
-            ? DIPLOMACY_HINT
-            : tab === 'airforce'
-              ? AIRFORCE_HINT
-              : tab === 'naval'
-                ? NAVAL_HINT
-                : RESEARCH_HINT;
+    // Über der Karte steht kein Hinweistext (mehr Platz für die Karte) - nur der Research-Tab erklärt sich noch.
+    this.hint.classList.toggle('hidden', tab !== 'research');
     // Research isn't tied to any one territory (unlike the other tabs, which recolor the map) -
     // it replaces the map/move-selection row entirely with its own tech-tree panel instead.
     this.mapRow.classList.toggle('hidden', tab === 'research');
     this.researchPanel.el.classList.toggle('hidden', tab !== 'research');
     this.researchPanel.el.classList.toggle('flex', tab === 'research');
+    this.syncLayout();
     if (tab === 'map') {
       this.map.applyGameState(this.currentGameState, this.client.playerId);
     } else if (tab === 'resources') {
@@ -858,39 +850,6 @@ export class GameScreen {
     } — ${myPoints} Rüstungspunkte`;
     this.endTurnBtn.disabled = !isMyTurn || gameState.pendingBattle !== null || gameState.pendingSeaBattle !== null || gameOver;
 
-    this.legend.replaceChildren();
-    for (const player of gameState.players) {
-      const capital = this.data.territories.find((t) => t.id === player.capitalId);
-      const isSelf = player.id === this.client.playerId;
-      const eliminated = isEliminated(gameState, player.id);
-      const chip = document.createElement(isSelf || eliminated ? 'div' : 'button');
-      if (!isSelf && !eliminated) (chip as HTMLButtonElement).type = 'button';
-      chip.className =
-        'flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm' +
-        (eliminated ? ' border-slate-800 bg-slate-900 text-slate-500' : ' text-slate-100') +
-        (!eliminated && player.id === gameState.activePlayerId ? ' border-amber-400 bg-slate-800' : '') +
-        (!eliminated && player.id !== gameState.activePlayerId ? ' border-slate-700 bg-slate-800' : '') +
-        (!isSelf && !eliminated ? ' hover:border-amber-500 hover:bg-slate-700' : '');
-      const swatch = document.createElement('span');
-      swatch.className = 'h-3 w-3 shrink-0 rounded-full' + (eliminated ? ' opacity-40' : '');
-      swatch.style.background = player.color;
-      const text = document.createElement('span');
-      if (eliminated) text.className = 'line-through';
-      const suffix = player.isAI ? ' (KI)' : '';
-      let relationSuffix = '';
-      if (!isSelf && !eliminated) {
-        const relation = getRelation(gameState, this.client.playerId, player.id);
-        if (relation.atWar) relationSuffix = ' · Krieg';
-        else if (relation.allied) relationSuffix = ' · Allianz';
-        else if (relation.pact?.active) relationSuffix = ' · Pakt';
-      }
-      const statusSuffix = eliminated ? ' — ausgeschieden' : relationSuffix;
-      text.textContent = `${player.name}${suffix} — ${capital?.name ?? player.capitalId}${statusSuffix}`;
-      chip.append(swatch, text);
-      if (!isSelf && !eliminated) chip.addEventListener('click', () => this.openDiplomacyMenu(player.id));
-      this.legend.appendChild(chip);
-    }
-
     this.renderStatsPanel(gameState);
 
     if (gameOver) {
@@ -905,56 +864,75 @@ export class GameScreen {
       this.gameOverView.classList.add('hidden');
       this.handlePendingBattle(gameState);
     }
+    this.syncLayout();
   }
 
-  /** Right below the legend: how many territories each faction currently holds, sorted
-   *  most-held-first, as both a proportional bar and an exact count - "wie viele Felder welcher
-   *  Farbe gehören". Rebuilt on every state update since ownership changes every turn. */
+  /** How many territories each faction currently holds, sorted most-held-first, as both a
+   *  proportional bar and an exact count - "wie viele Felder welcher Farbe gehören". Hochkant: the
+   *  bar runs vertically beside the list (a fixed strip on the left screen edge from lg up, see the
+   *  statsPanel classes, else below the map). Rebuilt on every state update since ownership
+   *  changes every turn. */
   private renderStatsPanel(gameState: GameState): void {
     this.statsPanel.replaceChildren();
 
     const title = document.createElement('div');
-    title.className = 'text-center text-xs font-semibold uppercase tracking-wide text-slate-400';
+    title.className = 'text-center text-[11px] font-semibold uppercase tracking-wide text-slate-400';
     title.textContent = 'Gebietsverteilung';
     this.statsPanel.appendChild(title);
 
     const standings = territoryStandings(gameState);
     const total = this.data.territories.length;
 
+    const body = document.createElement('div');
+    body.className = 'flex min-h-0 gap-2';
+
     const bar = document.createElement('div');
-    bar.className = 'flex h-4 w-full overflow-hidden rounded-full bg-slate-900';
+    bar.className = 'flex w-3 shrink-0 flex-col overflow-hidden rounded-full bg-slate-900';
     for (const { player, count } of standings) {
       if (count === 0) continue;
       const segment = document.createElement('div');
-      segment.style.width = `${(count / total) * 100}%`;
+      segment.style.flex = `${count} 1 0%`;
       segment.style.background = player.color;
       segment.title = `${player.name}: ${count}`;
       bar.appendChild(segment);
     }
-    this.statsPanel.appendChild(bar);
 
     const list = document.createElement('div');
-    list.className = 'flex flex-col gap-1 text-sm';
+    list.className = 'flex min-h-0 min-w-0 flex-1 flex-col gap-1 overflow-y-auto text-xs';
     for (const { player, count } of standings) {
       const eliminated = count === 0;
       const row = document.createElement('div');
-      row.className = `flex items-center justify-between gap-2 ${eliminated ? 'text-slate-500' : 'text-slate-200'}`;
+      row.className = `flex items-center justify-between gap-1 ${eliminated ? 'text-slate-500' : 'text-slate-200'}`;
+      const label = `${player.name}${player.isAI ? ' (KI)' : ''}`;
+      row.title = `${label}: ${count} / ${total}`;
       const left = document.createElement('span');
-      left.className = 'flex items-center gap-2';
+      left.className = 'flex min-w-0 items-center gap-1.5';
       const swatch = document.createElement('span');
       swatch.className = `h-2.5 w-2.5 shrink-0 rounded-full ${eliminated ? 'opacity-40' : ''}`;
       swatch.style.background = player.color;
       const name = document.createElement('span');
-      name.className = eliminated ? 'line-through' : '';
-      name.textContent = `${player.name}${player.isAI ? ' (KI)' : ''}`;
+      name.className = eliminated ? 'truncate line-through' : 'truncate';
+      name.textContent = label;
       left.append(swatch, name);
       const countEl = document.createElement('span');
-      countEl.className = 'tabular-nums';
-      countEl.textContent = `${count} / ${total}`;
+      countEl.className = 'shrink-0 tabular-nums';
+      countEl.textContent = String(count);
       row.append(left, countEl);
       list.appendChild(row);
     }
-    this.statsPanel.appendChild(list);
+
+    body.append(bar, list);
+    this.statsPanel.appendChild(body);
+  }
+
+  /** Ab lg (siehe style.css): in den Karten-Tabs füllt die Spielansicht genau die Fensterhöhe (`map-lock` auf <html>), damit
+   *  die Karte komplett sichtbar und zentriert ist; im Research-Tab, in der Kampf- und der Spielende-Ansicht bleibt der
+   *  normale, scrollbare Seitenfluss. Solange die Normalansicht sichtbar ist, lassen beide Seiten Platz für die Statistik-Leiste
+   *  am linken Rand - beidseitig gleich, damit die Karte mittig auf dem Bildschirm bleibt. */
+  private syncLayout(): void {
+    const normalVisible = !this.normalView.classList.contains('hidden');
+    document.documentElement.classList.toggle('map-lock', normalVisible && this.activeTab !== 'research');
+    this.container.classList.toggle('lg:px-48', normalVisible);
   }
 
   /** The dedicated end-of-game screen (see engine/victory.ts's isGameOver) that fully replaces the
@@ -3527,8 +3505,7 @@ export class GameScreen {
     refreshStepper();
   }
 
-  /** Opens from clicking another player's legend chip (or "Diplomatie öffnen" on the Diplomatie
-   *  tab's clicked-country panel): shows the current relation, that player's allies, and whichever
+  /** Opens from "Diplomatie öffnen" on the Diplomatie tab's clicked-country panel: shows the current relation, that player's allies, and whichever
    *  actions apply (declare war, propose/withdraw/cancel a pact, propose/withdraw an alliance or
    *  leave the one you're in). Stays open and refreshes itself as the game state updates, same
    *  reasoning as openDevelopmentMenu. */

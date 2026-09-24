@@ -39,8 +39,8 @@ export const europe1939: Scenario = {
       resources: 40,
       researchState: { unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'] },
       territories: [
-        { territoryId: 'ost-deutschland', garrison: { infantry: 20, lightTank: 8, heavyTank: 4, artillery: 5, motorizedInfantry: 0 } },
-        { territoryId: 'west-deutschland', garrison: { infantry: 15, lightTank: 6, heavyTank: 2, artillery: 4, motorizedInfantry: 0 } },
+        { territoryId: 'ost-deutschland', ships: 4, garrison: { infantry: 20, lightTank: 8, heavyTank: 4, artillery: 5, motorizedInfantry: 0 } },
+        { territoryId: 'west-deutschland', ships: 3, garrison: { infantry: 15, lightTank: 6, heavyTank: 2, artillery: 4, motorizedInfantry: 0 } },
         { territoryId: 'sued-deutschland', garrison: { infantry: 12, lightTank: 4, heavyTank: 2, artillery: 3, motorizedInfantry: 0 } },
         { territoryId: 'oesterreich', garrison: { infantry: 8, lightTank: 2, heavyTank: 0, artillery: 2, motorizedInfantry: 0 } },
         { territoryId: 'tschechien', garrison: { infantry: 8, lightTank: 2, heavyTank: 0, artillery: 2, motorizedInfantry: 0 } },
@@ -67,8 +67,8 @@ export const europe1939: Scenario = {
       researchState: { unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'] },
       territories: [
         { territoryId: 'zentral-russland', garrison: { infantry: 25, lightTank: 8, heavyTank: 3, artillery: 6, motorizedInfantry: 0 } },
-        { territoryId: 'nordwest-russland', garrison: { infantry: 12, lightTank: 3, heavyTank: 1, artillery: 2, motorizedInfantry: 0 } },
-        { territoryId: 'sued-russland', garrison: { infantry: 12, lightTank: 3, heavyTank: 1, artillery: 2, motorizedInfantry: 0 } },
+        { territoryId: 'nordwest-russland', ships: 3, garrison: { infantry: 12, lightTank: 3, heavyTank: 1, artillery: 2, motorizedInfantry: 0 } },
+        { territoryId: 'sued-russland', ships: 3, garrison: { infantry: 12, lightTank: 3, heavyTank: 1, artillery: 2, motorizedInfantry: 0 } },
         { territoryId: 'belarus', garrison: { infantry: 8, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'ukraine', garrison: { infantry: 10, lightTank: 2, heavyTank: 1, artillery: 2, motorizedInfantry: 0 } },
       ],
@@ -80,8 +80,8 @@ export const europe1939: Scenario = {
       resources: 30,
       researchState: { unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'] },
       territories: [
-        { territoryId: 'england', garrison: { infantry: 15, lightTank: 4, heavyTank: 1, artillery: 3, motorizedInfantry: 0 } },
-        { territoryId: 'schottland', garrison: { infantry: 6, lightTank: 1, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
+        { territoryId: 'england', ships: 8, garrison: { infantry: 15, lightTank: 4, heavyTank: 1, artillery: 3, motorizedInfantry: 0 } },
+        { territoryId: 'schottland', ships: 6, garrison: { infantry: 6, lightTank: 1, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'wales', garrison: { infantry: 4, lightTank: 0, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
         { territoryId: 'nordirland', garrison: { infantry: 4, lightTank: 0, heavyTank: 0, artillery: 0, motorizedInfantry: 0 } },
       ],
@@ -93,9 +93,9 @@ export const europe1939: Scenario = {
       resources: 30,
       researchState: { unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'] },
       territories: [
-        { territoryId: 'nord-frankreich', garrison: { infantry: 18, lightTank: 6, heavyTank: 2, artillery: 4, motorizedInfantry: 0 } },
+        { territoryId: 'nord-frankreich', ships: 4, garrison: { infantry: 18, lightTank: 6, heavyTank: 2, artillery: 4, motorizedInfantry: 0 } },
         { territoryId: 'ost-frankreich', garrison: { infantry: 10, lightTank: 3, heavyTank: 1, artillery: 2, motorizedInfantry: 0 } },
-        { territoryId: 'sued-frankreich', garrison: { infantry: 8, lightTank: 2, heavyTank: 0, artillery: 2, motorizedInfantry: 0 } },
+        { territoryId: 'sued-frankreich', ships: 4, garrison: { infantry: 8, lightTank: 2, heavyTank: 0, artillery: 2, motorizedInfantry: 0 } },
       ],
     },
     {
@@ -105,9 +105,9 @@ export const europe1939: Scenario = {
       resources: 20,
       researchState: { unlockedAir: ['fighters', 'cas'], unlockedNaval: ['ships'] },
       territories: [
-        { territoryId: 'mittel-italien', garrison: { infantry: 14, lightTank: 3, heavyTank: 1, artillery: 3, motorizedInfantry: 0 } },
+        { territoryId: 'mittel-italien', ships: 3, garrison: { infantry: 14, lightTank: 3, heavyTank: 1, artillery: 3, motorizedInfantry: 0 } },
         { territoryId: 'nord-italien', garrison: { infantry: 8, lightTank: 2, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
-        { territoryId: 'sued-italien', garrison: { infantry: 6, lightTank: 1, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
+        { territoryId: 'sued-italien', ships: 4, garrison: { infantry: 6, lightTank: 1, heavyTank: 0, artillery: 1, motorizedInfantry: 0 } },
       ],
     },
     // ============================== Minor nations (fill the rest of the map) ==============================

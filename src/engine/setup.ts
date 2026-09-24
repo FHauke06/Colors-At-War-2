@@ -204,7 +204,13 @@ export function buildGameStateFromScenario(scenario: Scenario, lobby: LobbyState
     resources.set(player.id, faction.resources);
     if (faction.nukeStockpile !== undefined) nukeStockpiles.set(player.id, faction.nukeStockpile);
     for (const st of faction.territories) {
-      territoryState.set(st.territoryId, { ownerId: player.id, garrison: st.garrison, movedIn: EMPTY_GARRISON, extraMoveUsed: EMPTY_GARRISON });
+      territoryState.set(st.territoryId, {
+        ownerId: player.id,
+        garrison: st.garrison,
+        movedIn: EMPTY_GARRISON,
+        extraMoveUsed: EMPTY_GARRISON,
+        ...(st.ships ? { ships: st.ships } : {}),
+      });
     }
   }
 
